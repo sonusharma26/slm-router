@@ -1,0 +1,35 @@
+# Model registry. Pricing is $ per 1M tokens (authoritative for reward math;
+# reconciled against OpenRouter usage.cost at runtime where available).
+# tier: SLM | small | frontier
+models:
+  - id: microsoft/phi-3.5-mini-128k-instruct
+    name: phi-3.5-mini
+    tier: SLM
+    price_in_per_m: 0.10
+    price_out_per_m: 0.10
+    context_len: 128000
+    supports_logprobs: false
+
+  - id: meta-llama/llama-3.1-8b-instruct
+    name: llama-3.1-8b
+    tier: small
+    price_in_per_m: 0.05
+    price_out_per_m: 0.05
+    context_len: 131072
+    supports_logprobs: false
+
+  - id: qwen/qwen-2.5-72b-instruct
+    name: qwen-2.5-72b
+    tier: small
+    price_in_per_m: 0.35
+    price_out_per_m: 0.40
+    context_len: 131072
+    supports_logprobs: false
+
+  - id: openai/gpt-4o
+    name: gpt-4o
+    tier: frontier
+    price_in_per_m: 2.50
+    price_out_per_m: 10.00
+    context_len: 128000
+    supports_logprobs: true

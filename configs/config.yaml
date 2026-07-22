@@ -1,0 +1,27 @@
+# Research knobs (version-controlled). Secrets live in .env, not here.
+reward:
+  correctness_weight: 1.0
+  lambda_cost: 50.0       # penalty weight on cost_usd (cost is tiny per call)
+  beta_latency: 0.0001    # penalty weight on latency_ms
+
+paths:
+  data_dir: data
+  results_dir: results
+  traces_dir: data/traces
+
+# Datasets to evaluate (v0: mmlu + gsm8k).
+datasets:
+  - mmlu
+  - gsm8k
+
+dataset_limit: 50          # deterministic stratified subsample per dataset
+dataset_seed: 13
+
+# Candidate models the router may choose among (subset of models.yaml ids).
+candidate_models:
+  - microsoft/phi-3.5-mini-128k-instruct
+  - openai/gpt-4o
+
+# LLM-as-judge for open-ended scoring.
+judge_model: openai/gpt-4o
+judge_temperature: 0.0
