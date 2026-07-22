@@ -5,37 +5,48 @@ description = "Self-Improving Model Router for SLM-LLM Systems"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "httpx>=0.27",
-    "tenacity>=8.4",
-    "diskcache>=5.6",
-    "aiolimiter>=1.1",
-    "pydantic>=2.7",
-    "pydantic-settings>=2.3",
-    "pyyaml>=6.0",
-    "typer>=0.12",
-    "fastapi>=0.111",
-    "uvicorn[standard]>=0.30",
-    "numpy>=1.26",
-    "scipy>=1.13",
-    "pandas>=2.2",
-    "pyarrow>=17.0",
-    "scikit-learn>=1.5",
-    "sentence-transformers>=3.0",
-    "torch>=2.3",
-    "datasets>=2.20",
-    "matplotlib>=3.9",
-    "tqdm>=4.66",
+    "httpx>=0.28.0",
+    "tenacity>=9.0.0",
+    "diskcache>=5.6.0",
+    "aiolimiter>=1.2.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "pyyaml>=6.0.2",          # Patched micro-version
+    "typer>=0.15.0",
+    "fastapi>=0.115.0",       # Resolves older web endpoint flaws
+    "uvicorn[standard]>=0.34.0", # Critical security baseline
+    "numpy>=2.2.0",           # Bumps up to modern major data standards
+    "scipy>=1.15.0",
+    "pandas>=2.2.3",
+    "pyarrow>=18.1.0",        # Safe against older RCE deserialization
+    "scikit-learn>=1.6.0",
+    "sentence-transformers>=3.3.0",
+    "torch>=2.5.0",           # Patched heavy-compute safety floor
+    "datasets>=3.2.0",
+    "matplotlib>=3.10.0",
+    "tqdm>=4.67.0",
 ]
 
 [project.optional-dependencies]
-conformal = ["mapie>=0.8"]
-nlp = ["spacy>=3.7"]
+conformal = ["mapie>=0.9.0"]
+nlp = ["spacy>=3.8.0"]
 obs = [
-    "opentelemetry-sdk>=1.27",
-    "opentelemetry-exporter-otlp>=1.27",
-    "langfuse>=2.44",
-    "arize-phoenix>=4.0",
+    "opentelemetry-sdk>=1.30.0",
+    "opentelemetry-exporter-otlp>=1.30.0",
+    "langfuse>=2.55.0",
+    "arize-phoenix>=4.40.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "respx>=0.22.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+    "ipykernel>=6.29.5",
+]
+
 
 [dependency-groups]
 dev = [
