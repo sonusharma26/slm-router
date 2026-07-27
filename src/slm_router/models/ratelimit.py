@@ -26,9 +26,13 @@ class RateLimiter:
 
     def __init__(self, requests_per_second: float = 4.0) -> None:
         if _AIOLIMITER_AVAILABLE and _AsyncLimiter is not None:
-            self._limiter = _AsyncLimiter(
-                max_rate=requests_per_second, time_period=1.0
-            )
+            # aiolimiter requires max_rate >= 1 (capacity for a single acquire).
+            # For sub-1 rates, stretch the time period instead of shrinking max_rate.
+            if requests_per_second >= 1:
+                max_rate, time_period = requests_per_second, 1.0
+            else:
+                max_rate, time_period = 1.0, 1.0 / requests_per_second
+            self._limiter = _AsyncLimiter(max_rate=max_rate, time_period=time_period)
         else:
             self._limiter = _NoOpLimiter()
 

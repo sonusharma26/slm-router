@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import Counter
 from typing import Any
 
 from slm_router.eval.datasets import load_dataset_items
@@ -41,11 +42,13 @@ async def build_oracle(
     limit: int | None = None,
     confirm: bool = True,
     concurrency: int = 8,
+    refresh: bool = False,
 ) -> None:
     """Call each candidate model on each eval item, score it, and store an oracle RunTrace.
 
-    Idempotent: already-stored (item, model, config_hash, 'oracle') cells are skipped,
-    so re-running resumes. Cost is pre-estimated and gated behind ``confirm``.
+    By default, already-stored cells are skipped so re-running resumes.
+    ``refresh=True`` deliberately re-calls and replaces them without using the
+    response cache. Cost is always pre-estimated and gated behind ``confirm``.
     """
     seed = getattr(config, "dataset_seed", 13)
 
@@ -63,20 +66,40 @@ async def build_oracle(
 
     cfg_hash = config_hash(config)
 
-    # Rough pre-estimate: 500 prompt + 200 completion tokens per call.
+    pending = [
+        (
+            item,
+            model_id,
+            store.has_run(item.item_id, model_id, cfg_hash, "oracle"),
+        )
+        for item in items
+        for model_id in candidate_models
+        if refresh
+        or not store.has_run(
+            item.item_id, model_id, cfg_hash, "oracle", successful_only=True
+        )
+    ]
+    if not pending:
+        print("[build_oracle] Oracle matrix is already complete; 0 calls needed.")
+        return
+
+    # Rough pre-estimate: 500 prompt + 200 completion tokens per pending call.
     from slm_router.types import Usage
 
-    est = 0.0
+    per_model_est: dict[str, float] = {}
     for mid in candidate_models:
         try:
-            est += registry.cost(mid, Usage(prompt_tokens=500, completion_tokens=200)).total_usd
+            per_model_est[mid] = registry.cost(
+                mid, Usage(prompt_tokens=500, completion_tokens=200)
+            ).total_usd
         except Exception:
-            pass
-    est *= len(items)
-    n_calls = len(items) * len(candidate_models)
+            per_model_est[mid] = 0.0
+    est = sum(per_model_est[mid] for _, mid, _ in pending)
+    n_calls = len(pending)
     print(
-        f"[build_oracle] {len(items)} items x {len(candidate_models)} models = "
-        f"{n_calls} calls. Estimated cost: ${est:.4f}"
+        f"[build_oracle] {n_calls} pending of "
+        f"{len(items) * len(candidate_models)} matrix cells. "
+        f"Estimated cost: ${est:.4f}"
     )
 
     if confirm:
@@ -89,34 +112,72 @@ async def build_oracle(
             return
 
     sem = asyncio.Semaphore(concurrency)
-    done = skipped = errors = 0
+    done = errors = completed = 0
+    skipped = len(items) * len(candidate_models) - len(pending)
+    stored_by_model: Counter[str] = Counter()
+    errors_by_model: Counter[str] = Counter()
+    print(
+        f"[build_oracle] Starting {len(pending)} calls; progress is reported "
+        "after the first completion and then every 5.",
+        flush=True,
+    )
 
-    async def process(item: Any, model_id: str) -> RunTrace | None:
-        nonlocal done, skipped, errors
-        if store.has_run(item.item_id, model_id, cfg_hash, "oracle"):
-            skipped += 1
-            return None
+    async def process(
+        item: Any,
+        model_id: str,
+        retrying_failed_cell: bool,
+    ) -> RunTrace | None:
+        nonlocal completed, done, errors
         async with sem:
-            try:
-                resp = await client.complete(
-                    model_id,
-                    [{"role": "user", "content": item.query}],
-                    temperature=0.0,
-                    max_tokens=1024,
-                )
-            except Exception as exc:
-                errors += 1
-                return RunTrace(
-                    run_id=_run_id(item.item_id, model_id, cfg_hash, "oracle"),
-                    item_id=item.item_id,
-                    dataset=item.dataset,
-                    task_type=str(item.task_type),
-                    model=model_id,
-                    model_tier=_tier(registry, model_id),
-                    run_kind="oracle",
-                    config_hash=cfg_hash,
-                    error=str(exc),
-                )
+            trace = await _call_and_score(
+                item,
+                model_id,
+                bypass_cache=refresh or retrying_failed_cell,
+            )
+        # Persist immediately so a killed/interrupted run keeps whatever
+        # completed so far, instead of losing everything to a final batch insert.
+        if trace is not None:
+            store.insert_many([trace])
+            if trace.error:
+                errors_by_model[model_id] += 1
+            else:
+                stored_by_model[model_id] += 1
+        completed += 1
+        if completed == 1 or completed == len(pending) or completed % 5 == 0:
+            print(
+                f"[build_oracle] Progress: {completed}/{len(pending)} "
+                f"(stored={done}, errors={errors})",
+                flush=True,
+            )
+        return trace
+
+    async def _call_and_score(
+        item: Any,
+        model_id: str,
+        bypass_cache: bool,
+    ) -> RunTrace | None:
+        nonlocal done, errors
+        try:
+            resp = await client.complete(
+                model_id,
+                [{"role": "user", "content": item.query}],
+                temperature=0.0,
+                max_tokens=1024,
+                use_cache=not bypass_cache,
+            )
+        except Exception as exc:
+            errors += 1
+            return RunTrace(
+                run_id=_run_id(item.item_id, model_id, cfg_hash, "oracle"),
+                item_id=item.item_id,
+                dataset=item.dataset,
+                task_type=str(item.task_type),
+                model=model_id,
+                model_tier=_tier(registry, model_id),
+                run_kind="oracle",
+                config_hash=cfg_hash,
+                error=str(exc),
+            )
         try:
             sr = score_response(item, resp.text)
         except Exception as exc:
@@ -145,15 +206,20 @@ async def build_oracle(
             error=err,
         )
 
-    results = await asyncio.gather(
-        *(process(it, mid) for it in items for mid in candidate_models)
+    # process() persists each trace as soon as it completes, so results here
+    # are only used for the summary counts, not a final batch insert.
+    await asyncio.gather(
+        *(process(it, mid, retrying) for it, mid, retrying in pending)
     )
-    traces = [r for r in results if r is not None]
-    if traces:
-        store.insert_many(traces)
     print(
         f"[build_oracle] Done. stored={done} skipped={skipped} errors={errors}"
     )
+    for model_id in candidate_models:
+        if stored_by_model[model_id] or errors_by_model[model_id]:
+            print(
+                f"  {model_id}: stored={stored_by_model[model_id]} "
+                f"errors={errors_by_model[model_id]}"
+            )
 
 
 def _tier(registry: Any, model_id: str) -> str:

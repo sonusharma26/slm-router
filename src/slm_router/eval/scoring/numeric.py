@@ -12,6 +12,10 @@ if TYPE_CHECKING:
 # Number extraction helpers
 # ---------------------------------------------------------------------------
 
+# "#### N" — GSM8K's own gold-answer convention; models are instructed to
+# echo it, so it's the most reliable marker when present.
+_HASH_RE = re.compile(r"####\s*\$?\s*([-+]?\d[\d,\s]*\.?\d*)")
+
 # Matches \boxed{N} or \boxed{-N} or \boxed{N.M}
 _BOXED_RE = re.compile(r"\\boxed\{\s*([-+]?\d[\d,\s]*\.?\d*)\s*\}")
 
@@ -41,21 +45,30 @@ def _extract_number(text: str) -> float | None:
     """Extract the most likely numeric answer from model output.
 
     Priority:
-    1. \\boxed{N}
-    2. "answer is N"
-    3. Last number in the text
+    1. "#### N" (GSM8K gold-answer convention; models are instructed to echo it)
+    2. \\boxed{N}
+    3. "answer is N"
+    4. Last number in the text
     """
-    # 1. \boxed{N}
-    match = _BOXED_RE.search(text)
-    if match:
-        val = _parse_float(match.group(1))
+    # 0. "#### N" (last one, in case of repeated markers)
+    hash_matches = _HASH_RE.findall(text)
+    for candidate in reversed(hash_matches):
+        val = _parse_float(candidate)
         if val is not None:
             return val
 
-    # 2. "answer is N"
-    match = _ANSWER_IS_RE.search(text)
-    if match:
-        val = _parse_float(match.group(1))
+    # 1. \boxed{N} (last one, in case of multiple boxed intermediate results)
+    boxed_matches = _BOXED_RE.findall(text)
+    for candidate in reversed(boxed_matches):
+        val = _parse_float(candidate)
+        if val is not None:
+            return val
+
+    # 2. "answer is N" (last one, since reasoning text often contains
+    # earlier "= N" for intermediate steps before the final answer)
+    answer_matches = _ANSWER_IS_RE.findall(text)
+    for candidate in reversed(answer_matches):
+        val = _parse_float(candidate)
         if val is not None:
             return val
 

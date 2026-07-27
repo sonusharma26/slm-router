@@ -6,7 +6,16 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from pathlib import Path
+
 from slm_router.types import ConfidenceOut
+
+try:
+    import joblib as _joblib  # type: ignore
+    _JOBLIB_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _joblib = None  # type: ignore
+    _JOBLIB_AVAILABLE = False
 from slm_router.ml_core.confidence.calibration import (
     ConformalCalibrator,
     EnsembleUncertainty,
@@ -220,3 +229,24 @@ class ConfidencePredictor:
             logger.warning("No classifier; ConfidencePredictor in heuristic mode.")
 
         return self
+
+    # ------------------------------------------------------------------
+    # Persistence (mirrors RoutingPolicy.save/load in policy_base.py)
+    # ------------------------------------------------------------------
+
+    def save(self, path: str | Path) -> None:
+        """Serialise predictor state (classifier + calibrators) via joblib."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not _JOBLIB_AVAILABLE:
+            raise RuntimeError("joblib is required for ConfidencePredictor save/load.")
+        _joblib.dump(self.__dict__, path)
+        logger.info("ConfidencePredictor saved to %s.", path)
+
+    def load(self, path: str | Path) -> None:
+        """Restore predictor state from *path*."""
+        if not _JOBLIB_AVAILABLE:
+            raise RuntimeError("joblib is required for ConfidencePredictor save/load.")
+        data = _joblib.load(path)
+        self.__dict__.update(data)
+        logger.info("ConfidencePredictor loaded from %s.", path)

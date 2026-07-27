@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from slm_router.eval.datasets.base import BenchmarkLoader
-from slm_router.eval.datasets.schema import EvalItem, TaskType
+from slm_router.eval.datasets.schema import EvalItem, TaskType, stable_item_id
 
 _HASH_SEP = "####"
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
@@ -36,7 +36,7 @@ class GSM8KLoader(BenchmarkLoader):
     HuggingFace dataset: gsm8k, config: main
     """
 
-    HF_DATASET = "gsm8k"
+    HF_DATASET = "openai/gsm8k"
     HF_CONFIG = "main"
 
     @property
@@ -65,7 +65,6 @@ class GSM8KLoader(BenchmarkLoader):
             self.HF_DATASET,
             self.HF_CONFIG,
             split=split,
-            trust_remote_code=True,
         )
 
         items: list[EvalItem] = []
@@ -84,10 +83,17 @@ class GSM8KLoader(BenchmarkLoader):
 
         gold = _extract_gold_numeric(raw_answer)
 
+        query = (
+            f"{question}\n\n"
+            "Show your work, then end your response with the final numeric "
+            "answer on its own line in the form: #### <number>"
+        )
+
         return EvalItem(
+            item_id=stable_item_id(self.name, query),
             dataset=self.name,
             task_type=self.task_type,
-            query=question,
+            query=query,
             gold_answer=gold,
             reference={"raw_answer": raw_answer},
             metadata={},

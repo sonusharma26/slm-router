@@ -18,7 +18,7 @@ class SelfImprovementLoop:
       only if its FQE value beats the incumbent by ``margin`` (off-policy gate).
     """
 
-    def __init__(self, store: Any, policy: Any, margin: float = 0.0):
+    def __init__(self, store: Any, policy: Any | None, margin: float = 0.0):
         self.store = store
         self.policy = policy
         self.margin = margin
@@ -36,21 +36,41 @@ class SelfImprovementLoop:
                 logger.debug("online update skipped: %s", exc)
         return n
 
-    def retrain_batch(self, candidate_policy: Any) -> dict[str, Any]:
-        """Fit ``candidate_policy`` on all logged traces and gate promotion via FQE.
+    def retrain_batch(
+        self, candidate_policy: Any, traces: list[Any] | None = None
+    ) -> dict[str, Any]:
+        """Fit ``candidate_policy`` on logged traces and gate promotion via FQE.
 
         Returns a dict describing the decision. Does not mutate ``self.policy``
         unless the gate passes; the caller persists/promotes the returned policy.
+
+        If ``traces`` is omitted, falls back to querying the store for
+        ``live``/``router_eval`` traces (the online-serving path). Callers
+        training from an oracle matrix should build samples themselves (see
+        ``ml_core.routing.trace_adapter``) and pass them in directly.
         """
-        traces = self.store.query(run_kind="live") + self.store.query(run_kind="router_eval")
+        if traces is None:
+            traces = self.store.query(run_kind="live") + self.store.query(run_kind="router_eval")
         if not traces:
             return {"promoted": False, "reason": "no traces"}
 
         candidate_policy.fit(traces)
-        try:
-            incumbent_val = self.policy.fqe_value(traces)
-        except Exception:
-            incumbent_val = float("-inf")  # no incumbent FQE -> any candidate may win
+        readiness = getattr(candidate_policy, "training_readiness", None)
+        if readiness is not None:
+            ready, reason = readiness()
+            if not ready:
+                return {
+                    "promoted": False,
+                    "reason": reason,
+                    "n_traces": len(traces),
+                }
+        if self.policy is None:
+            incumbent_val = float("-inf")
+        else:
+            try:
+                incumbent_val = self.policy.fqe_value(traces)
+            except Exception:
+                incumbent_val = float("-inf")
         candidate_val = candidate_policy.fqe_value(traces)
 
         promote = candidate_val > incumbent_val + self.margin

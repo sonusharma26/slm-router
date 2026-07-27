@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from slm_router.eval.datasets.base import BenchmarkLoader
-from slm_router.eval.datasets.schema import EvalItem, TaskType
+from slm_router.eval.datasets.schema import EvalItem, TaskType, stable_item_id
 
 
 class HumanEvalLoader(BenchmarkLoader):
@@ -12,7 +12,7 @@ class HumanEvalLoader(BenchmarkLoader):
     HuggingFace dataset: openai_humaneval
     """
 
-    HF_DATASET = "openai_humaneval"
+    HF_DATASET = "openai/openai_humaneval"
 
     @property
     def name(self) -> str:
@@ -39,7 +39,6 @@ class HumanEvalLoader(BenchmarkLoader):
         ds = load_dataset(
             self.HF_DATASET,
             split=split,
-            trust_remote_code=True,
         )
 
         items: list[EvalItem] = []
@@ -73,6 +72,7 @@ class HumanEvalLoader(BenchmarkLoader):
         }
 
         return EvalItem(
+            item_id=stable_item_id(self.name, task_id or query),
             dataset=self.name,
             task_type=self.task_type,
             query=query,

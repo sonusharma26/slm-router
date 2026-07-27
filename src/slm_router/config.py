@@ -18,6 +18,7 @@ class PathsConfig(BaseModel):
     data_dir: str = "data"
     results_dir: str = "results"
     traces_dir: str = "data/traces"
+    models_dir: str = "models"
 
 
 class AppConfig(BaseModel):
@@ -26,6 +27,9 @@ class AppConfig(BaseModel):
     datasets: list[str] = ["mmlu", "gsm8k"]
     dataset_limit: int = 50
     dataset_seed: int = 13
+    router_holdout_fraction: float = 0.2
+    minimum_holdout_items: int = 20
+    slm_quality_tolerance: float = 0.05
     candidate_models: list[str] = []
     judge_model: str = "openai/gpt-4o"
     judge_temperature: float = 0.0

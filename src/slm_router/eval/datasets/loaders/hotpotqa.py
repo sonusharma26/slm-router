@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from slm_router.eval.datasets.base import BenchmarkLoader
-from slm_router.eval.datasets.schema import EvalItem, TaskType
+from slm_router.eval.datasets.schema import EvalItem, TaskType, stable_item_id
 
 
 class HotpotQALoader(BenchmarkLoader):
@@ -12,7 +12,7 @@ class HotpotQALoader(BenchmarkLoader):
     HuggingFace dataset: hotpot_qa, config: distractor
     """
 
-    HF_DATASET = "hotpot_qa"
+    HF_DATASET = "hotpotqa/hotpot_qa"
     HF_CONFIG = "distractor"
 
     @property
@@ -41,7 +41,6 @@ class HotpotQALoader(BenchmarkLoader):
             self.HF_DATASET,
             self.HF_CONFIG,
             split=split,
-            trust_remote_code=True,
         )
 
         items: list[EvalItem] = []
@@ -68,6 +67,7 @@ class HotpotQALoader(BenchmarkLoader):
             reference = {"supporting_facts": supporting_facts}
 
         return EvalItem(
+            item_id=stable_item_id(self.name, question),
             dataset=self.name,
             task_type=self.task_type,
             query=question,
