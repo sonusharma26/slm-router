@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-27T00:00:00Z",
+  "snapshot_tag": "v1-research-snapshot",
+  "test_command": "uv run pytest -q",
+  "tests": {"collected": 25, "passed": 25, "failed": 0, "status": "validated"},
+  "artifacts": {
+    "results/router_eval.json": "absent",
+    "results/pareto.png": "absent",
+    "results/router_eval_live.json": "absent"
+  },
+  "claims": {
+    "offline_unit_behavior": "validated",
+    "live_provider_execution": "absent",
+    "cost_savings": "absent",
+    "generalization": "absent",
+    "production_readiness": "absent"
+  }
+}
