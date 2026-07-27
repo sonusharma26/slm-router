@@ -1,10 +1,9 @@
 """Sentence embedding with a deterministic offline fallback."""
+
 from __future__ import annotations
 
 import hashlib
 import logging
-from typing import TYPE_CHECKING
-
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -14,6 +13,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 try:
     from sentence_transformers import SentenceTransformer as _ST  # type: ignore
+
     _ST_AVAILABLE = True
 except Exception:  # noqa: BLE001
     _ST_AVAILABLE = False
@@ -33,8 +33,8 @@ def _hash_embed(text: str, dim: int = _FALLBACK_DIM) -> np.ndarray:
     digest = hashlib.sha512(text.encode()).digest()  # 64 bytes
     # Tile digest until we have enough bytes
     repeats = (dim * 4 // len(digest)) + 2
-    raw = (digest * repeats)[: dim * 4]
-    vec = np.frombuffer(raw, dtype=np.float32).copy()
+    raw = (digest * repeats)[:dim]
+    vec = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
     vec = vec - vec.mean()
     norm = np.linalg.norm(vec)
     if norm > 0:
@@ -55,23 +55,21 @@ class Embedder:
     model_name:
         HuggingFace model identifier.  Ignored by the fallback.
     use_fallback:
-        Force the hashing fallback even when sentence-transformers is
-        installed (useful for tests).
+        Use the hashing fallback (default). Set false only when a locally available
+        sentence-transformers model is explicitly intended.
     """
 
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
-        use_fallback: bool = False,
+        use_fallback: bool = True,
     ) -> None:
         self.model_name = model_name
         self._use_fallback = use_fallback or not _ST_AVAILABLE
         self._model: object | None = None
 
         if self._use_fallback:
-            logger.warning(
-                "sentence-transformers not available; using hashing fallback embedder."
-            )
+            logger.warning("sentence-transformers not available; using hashing fallback embedder.")
 
     # ------------------------------------------------------------------
     # Internal

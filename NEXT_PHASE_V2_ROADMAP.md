@@ -599,14 +599,14 @@ its code, test, command, and evidence artifact exist.
 
 **Purpose:** Establish a trustworthy baseline before changing architecture.
 
-- [ ] `V2-000` Tag the current repository as `v1-research-snapshot`.
-- [ ] `V2-001` Produce one machine-generated status manifest from tests and
+- [x] `V2-000` Tag the current repository as `v1-research-snapshot`.
+- [x] `V2-001` Produce one machine-generated status manifest from tests and
       existing artifacts.
-- [ ] `V2-002` Reconcile README, roadmap, result counts, and execution claims.
-- [ ] `V2-003` Run the complete offline test suite in CI.
-- [ ] `V2-004` Add a deterministic no-network smoke command.
-- [ ] `V2-005` Mark every v1 result as validated, smoke-only, stale, or absent.
-- [ ] `V2-006` Write architecture decisions for the three data regimes and the
+- [x] `V2-002` Reconcile README, roadmap, result counts, and execution claims.
+- [x] `V2-003` Run the complete offline test suite in CI.
+- [x] `V2-004` Add a deterministic no-network smoke command.
+- [x] `V2-005` Mark every v1 result as validated, smoke-only, stale, or absent.
+- [x] `V2-006` Write architecture decisions for the three data regimes and the
       removal of scalar-reward routing.
 
 **Gate V2-G0**
@@ -620,14 +620,14 @@ its code, test, command, and evidence artifact exist.
 
 **Purpose:** Make correctness testable without API spend.
 
-- [ ] `V2-100` Implement the seven core versioned contracts.
-- [ ] `V2-101` Implement append-only events and schema migrations.
-- [ ] `V2-102` Implement the policy constraint DSL and static validator.
-- [ ] `V2-103` Implement plan upper-bound validation for calls and spend.
-- [ ] `V2-104` Build a deterministic synthetic model-pool simulator with known
+- [x] `V2-100` Implement the seven core versioned contracts.
+- [x] `V2-101` Implement append-only events and schema migrations.
+- [x] `V2-102` Implement the policy constraint DSL and static validator.
+- [x] `V2-103` Implement plan upper-bound validation for calls and spend.
+- [x] `V2-104` Build a deterministic synthetic model-pool simulator with known
       quality, cost, latency, availability, and drift.
-- [ ] `V2-105` Add replay by request, policy, endpoint, and estimator versions.
-- [ ] `V2-106` Add property tests for infeasibility, budget bounds, privacy
+- [x] `V2-105` Add replay by request, policy, endpoint, and estimator versions.
+- [x] `V2-106` Add property tests for infeasibility, budget bounds, privacy
       eligibility, idempotency, and replay determinism.
 
 **Gate V2-G1**
@@ -642,14 +642,14 @@ its code, test, command, and evidence artifact exist.
 
 **Purpose:** Deliver a simple, correct system before learned adaptation.
 
-- [ ] `V2-200` Implement immutable endpoint and price snapshots.
-- [ ] `V2-201` Implement mock, OpenAI-compatible, and LiteLLM adapters.
-- [ ] `V2-202` Implement direct, cascade, verify-escalate, and abstain plans.
-- [ ] `V2-203` Separate query-only and post-response feature pipelines.
-- [ ] `V2-204` Implement always-endpoint, cheapest-eligible, random, static-best,
+- [x] `V2-200` Implement immutable endpoint and price snapshots.
+- [x] `V2-201` Implement mock, OpenAI-compatible, and LiteLLM adapters.
+- [x] `V2-202` Implement direct, cascade, verify-escalate, and abstain plans.
+- [x] `V2-203` Separate query-only and post-response feature pipelines.
+- [x] `V2-204` Implement always-endpoint, cheapest-eligible, random, static-best,
       kNN, logistic, and tuned-threshold baselines.
-- [ ] `V2-205` Implement direct full-information replay.
-- [ ] `V2-206` Implement `/v2/decide`, `/v2/execute`, and decision audit.
+- [x] `V2-205` Implement direct full-information replay.
+- [x] `V2-206` Implement `/v2/decide`, `/v2/execute`, and decision audit.
 
 **Gate V2-G2**
 
@@ -662,13 +662,13 @@ its code, test, command, and evidence artifact exist.
 
 **Purpose:** Replace exhaustive oracle rebuilding with decision-aware evidence.
 
-- [ ] `V2-300` Implement endpoint- and plan-aware quality estimators.
-- [ ] `V2-301` Implement quantile cost and latency estimators.
-- [ ] `V2-302` Store calibration lineage and uncertainty intervals.
-- [ ] `V2-303` Implement stable canary and held-out probe catalogs.
-- [ ] `V2-304` Implement random, uncertainty, and decision-impact acquisition
+- [x] `V2-300` Implement endpoint- and plan-aware quality estimators.
+- [x] `V2-301` Implement quantile cost and latency estimators.
+- [x] `V2-302` Store calibration lineage and uncertainty intervals.
+- [x] `V2-303` Implement stable canary and held-out probe catalogs.
+- [x] `V2-304` Implement random, uncertainty, and decision-impact acquisition
       baselines.
-- [ ] `V2-305` Implement the budgeted active probe scheduler.
+- [x] `V2-305` Implement the budgeted active probe scheduler.
 - [ ] `V2-306` Compare sparse refresh against exhaustive refresh in simulation
       and one frozen public matrix.
 
@@ -690,14 +690,14 @@ test, and report failure if it does not pass.
 
 **Purpose:** Turn capability estimates into bounded decisions.
 
-- [ ] `V2-400` Implement feasibility filtering and lexicographic plan search.
-- [ ] `V2-401` Implement distribution-aware quality, cost, and latency checks.
-- [ ] `V2-402` Implement calibration sets isolated from training and policy
+- [x] `V2-400` Implement feasibility filtering and lexicographic plan search.
+- [x] `V2-401` Implement distribution-aware quality, cost, and latency checks.
+- [x] `V2-402` Implement calibration sets isolated from training and policy
       selection.
-- [ ] `V2-403` Implement versioned risk certificates and expiry.
-- [ ] `V2-404` Implement policy-defined fallback and abstention.
-- [ ] `V2-405` Add subgroup and traffic-slice calibration reports.
-- [ ] `V2-406` Add certificate invalidation hooks for relevant drift.
+- [x] `V2-403` Implement versioned risk certificates and expiry.
+- [x] `V2-404` Implement policy-defined fallback and abstention.
+- [x] `V2-405` Add subgroup and traffic-slice calibration reports.
+- [x] `V2-406` Add certificate invalidation hooks for relevant drift.
 
 **Gate V2-G4**
 
@@ -711,15 +711,15 @@ test, and report failure if it does not pass.
 
 **Purpose:** Make “self-improving” an evidence-controlled process.
 
-- [ ] `V2-500` Implement deterministic, application, human, calibrated-judge,
+- [x] `V2-500` Implement deterministic, application, human, calibrated-judge,
       and proxy outcome adapters.
-- [ ] `V2-501` Implement training and promotion eligibility rules.
-- [ ] `V2-502` Implement delayed outcome linkage and label supersession.
-- [ ] `V2-503` Log action propensities for bounded exploration.
-- [ ] `V2-504` Implement IPS, SNIPS, DR, and SWITCH with overlap and effective
+- [x] `V2-501` Implement training and promotion eligibility rules.
+- [x] `V2-502` Implement delayed outcome linkage and label supersession.
+- [x] `V2-503` Log action propensities for bounded exploration.
+- [x] `V2-504` Implement IPS, SNIPS, DR, and SWITCH with overlap and effective
       sample-size diagnostics.
-- [ ] `V2-505` Implement the candidate-policy artifact and evaluation report.
-- [ ] `V2-506` Implement the policy lifecycle state machine.
+- [x] `V2-505` Implement the candidate-policy artifact and evaluation report.
+- [x] `V2-506` Implement the policy lifecycle state machine.
 
 **Gate V2-G5**
 
@@ -733,15 +733,15 @@ test, and report failure if it does not pass.
 
 **Purpose:** Prove that adaptation is useful when the world changes.
 
-- [ ] `V2-600` Implement deterministic price, configuration, and availability
+- [x] `V2-600` Implement deterministic price, configuration, and availability
       change detection.
-- [ ] `V2-601` Implement workload, latency, quality, and evaluator drift
+- [x] `V2-601` Implement workload, latency, quality, and evaluator drift
       monitors with minimum-evidence rules.
-- [ ] `V2-602` Map each drift type to affected estimates and certificates.
-- [ ] `V2-603` Trigger bounded diagnostic probes after actionable drift.
-- [ ] `V2-604` Implement shadow and canary traffic modes.
-- [ ] `V2-605` Implement sequential stop rules and atomic rollback.
-- [ ] `V2-606` Build fault scenarios for silent quality regression, price
+- [x] `V2-602` Map each drift type to affected estimates and certificates.
+- [x] `V2-603` Trigger bounded diagnostic probes after actionable drift.
+- [x] `V2-604` Implement shadow and canary traffic modes.
+- [x] `V2-605` Implement sequential stop rules and atomic rollback.
+- [x] `V2-606` Build fault scenarios for silent quality regression, price
       change, endpoint loss, latency spike, bad evaluator, missing labels, and
       corrupted policy artifacts.
 
@@ -761,12 +761,12 @@ test, and report failure if it does not pass.
 - [ ] `V2-700` Add an LLMRouterBench adapter for broad query-level evaluation.
 - [ ] `V2-701` Add a TwinRouterBench adapter after the query-level path is
       stable.
-- [ ] `V2-702` Create the **Dynamic-Pool Gauntlet** with versioned scenarios:
+- [x] `V2-702` Create the **Dynamic-Pool Gauntlet** with versioned scenarios:
       price changes, model replacement, endpoint loss, latency shifts, quality
       regression, workload shift, reward delay, and evaluator corruption.
-- [ ] `V2-703` Define at least three realistic policy profiles: cost-capped,
+- [x] `V2-703` Define at least three realistic policy profiles: cost-capped,
       latency-critical, and privacy-restricted.
-- [ ] `V2-704` Freeze primary hypotheses, metrics, exclusions, and thresholds
+- [x] `V2-704` Freeze primary hypotheses, metrics, exclusions, and thresholds
       before final runs.
 - [ ] `V2-705` Run static, time-split, leave-domain-out, and dynamic-pool tests.
 - [ ] `V2-706` Run at least three training seeds and repeated live measurements
