@@ -1,3 +1,5 @@
+> **Legacy document (frozen 2026-07-27).** This v1 plan is superseded by [NEXT_PHASE_V2_ROADMAP.md](NEXT_PHASE_V2_ROADMAP.md). Its FQE/scalar-reward assumptions are not valid for v2.
+
 # Project Roadmap — SLM Router
 
 **Date:** 2026-07-22

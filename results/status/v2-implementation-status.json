@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-07-27T00:00:00Z",
+  "scope": "V2.2 through V2.7 dataset-independent implementation",
+  "implemented_tasks": [
+    "V2-200", "V2-201", "V2-202", "V2-203", "V2-204", "V2-205", "V2-206",
+    "V2-300", "V2-301", "V2-302", "V2-303", "V2-304", "V2-305",
+    "V2-400", "V2-401", "V2-402", "V2-403", "V2-404", "V2-405", "V2-406",
+    "V2-500", "V2-501", "V2-502", "V2-503", "V2-504", "V2-505", "V2-506",
+    "V2-600", "V2-601", "V2-602", "V2-603", "V2-604", "V2-605", "V2-606",
+    "V2-702", "V2-703", "V2-704"
+  ],
+  "deferred_for_dataset_or_evaluation": ["V2-306", "V2-700", "V2-701", "V2-705", "V2-706", "V2-707"],
+  "claims": {
+    "implementation": "offline-tested",
+    "phase_gates": "not passed; empirical evaluation deferred",
+    "benchmark_superiority": "absent",
+    "live_provider_validation": "absent"
+  },
+  "test_command": "uv run pytest -q"
+}

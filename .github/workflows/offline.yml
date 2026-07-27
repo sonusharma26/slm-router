@@ -1,0 +1,13 @@
+name: offline
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {enable-cache: true}
+      - run: uv sync --frozen
+      - run: uv run inference-control-smoke
+      - run: uv run pytest -q
+      - run: uv run ruff check src/inference_control tests/test_v2_control_plane.py
