@@ -14,6 +14,8 @@ except ImportError:
     diskcache = None  # type: ignore
     _DISKCACHE_AVAILABLE = False
 
+CACHE_VERSION = 2
+
 
 def make_key(
     model_id: str,
@@ -25,6 +27,7 @@ def make_key(
     """Return a stable sha256 hex key for the given call parameters."""
     payload = json.dumps(
         {
+            "cache_version": CACHE_VERSION,
             "model_id": model_id,
             "messages": messages,
             "temperature": temperature,

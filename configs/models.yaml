@@ -2,12 +2,28 @@
 # reconciled against OpenRouter usage.cost at runtime where available).
 # tier: SLM | small | frontier
 models:
-  - id: microsoft/phi-3.5-mini-128k-instruct
-    name: phi-3.5-mini
+  - id: nvidia/nemotron-nano-9b-v2:free
+    name: nemotron-nano-9b
     tier: SLM
-    price_in_per_m: 0.10
-    price_out_per_m: 0.10
+    price_in_per_m: 0.0
+    price_out_per_m: 0.0
     context_len: 128000
+    supports_logprobs: false
+
+  - id: openai/gpt-oss-20b:free
+    name: gpt-oss-20b
+    tier: frontier
+    price_in_per_m: 0.0
+    price_out_per_m: 0.0
+    context_len: 131072
+    supports_logprobs: false
+
+  - id: microsoft/phi-4
+    name: phi-4
+    tier: SLM
+    price_in_per_m: 0.07
+    price_out_per_m: 0.14
+    context_len: 16384
     supports_logprobs: false
 
   - id: meta-llama/llama-3.1-8b-instruct
@@ -33,3 +49,33 @@ models:
     price_out_per_m: 10.00
     context_len: 128000
     supports_logprobs: true
+
+  # Called directly through the Gemini API. Prices remain the paid-equivalent
+  # list prices for reward math even when requests use Google's free API quota.
+  - id: gemini-3.1-flash-lite
+    name: gemini-3.1-flash-lite
+    tier: SLM
+    provider: google
+    price_in_per_m: 0.25
+    price_out_per_m: 1.50
+    context_len: 1048576
+    supports_logprobs: false
+
+  - id: gemini-2.5-pro
+    name: gemini-2.5-pro
+    tier: frontier
+    provider: google
+    price_in_per_m: 1.25
+    price_out_per_m: 5.00
+    # This price row represents the user-specified <=128k prompt tier.
+    context_len: 128000
+    supports_logprobs: false
+
+  - id: gemini-3.6-flash
+    name: gemini-3.6-flash
+    tier: small
+    provider: google
+    price_in_per_m: 1.50
+    price_out_per_m: 7.50
+    context_len: 1048576
+    supports_logprobs: false

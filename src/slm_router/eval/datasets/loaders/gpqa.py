@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from slm_router.eval.datasets.base import BenchmarkLoader
-from slm_router.eval.datasets.schema import EvalItem, TaskType
+from slm_router.eval.datasets.schema import EvalItem, TaskType, stable_item_id
 
 _LETTERS = ["A", "B", "C", "D"]
 
@@ -116,14 +116,12 @@ class GPQALoader(BenchmarkLoader):
                 self.HF_DATASET,
                 self.HF_CONFIG,
                 split=split,
-                trust_remote_code=True,
             )
         except Exception:
             ds = load_dataset(
                 self.HF_DATASET,
                 self.HF_CONFIG,
                 split="train",
-                trust_remote_code=True,
             )
 
         items: list[EvalItem] = []
@@ -154,6 +152,7 @@ class GPQALoader(BenchmarkLoader):
                 meta[str(key)] = row[key]
 
         return EvalItem(
+            item_id=stable_item_id(self.name, query),
             dataset=self.name,
             task_type=self.task_type,
             query=query,

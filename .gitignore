@@ -14,3 +14,4 @@ results/*
 .ruff_cache/
 .mypy_cache/
 artifacts/
+models/

@@ -105,6 +105,52 @@ Run against the artifacts from Phases 1–2.
 
 ---
 
+## Phase 5 — Benchmark claim-readiness
+
+**Gate before publishing *any* performance or cost-savings claim.** The current
+results (~100 items, 2 datasets, all `:free` models) are a smoke test, not
+evidence. Three things make them indefensible today: **coverage**, **the cost
+axis**, and **statistical rigor**. All three must be closed.
+
+### 5.1 Dataset coverage
+Loaders already exist for all five ([eval/datasets/loaders/](src/slm_router/eval/datasets/loaders/)) — this is about *using* them across difficulty regimes and task types, so a math-only win can't masquerade as a general one.
+
+| Dataset | Regime | Why required |
+|---|---|---|
+| MMLU | Broad knowledge, MCQ | Easy/medium band — proves we don't over-escalate |
+| GSM8K | Grade-school math, CoT | Reasoning where mid models beat SLMs |
+| **GPQA** | Graduate-level, hard | The escalation case — router must send these to the frontier |
+| HotpotQA | Multi-hop QA | Non-math reasoning; guards against math-only overfit |
+| HumanEval | Code generation | Exec-based scoring; stresses featurizer generality |
+
+- [ ] Minimum bar: **4–5 datasets** including one genuinely hard (**GPQA**) and one code (**HumanEval**). Two datasets is a demo.
+- [ ] Highest-leverage single addition: **GPQA** — without a hard set we can only show "picks cheap models when everything is easy," not that it escalates correctly.
+
+### 5.2 Sample size & coverage
+- [ ] **≥300–500 scored items per dataset** (currently ~50). Below ~300 the regret CI is wider than the effect being claimed.
+- [ ] **Full oracle coverage** — every candidate × every item, no missing cells. The current ~45% rate-limit loss makes even small numbers suspect (paced free-tier collection over time, or paid oracle calls).
+
+### 5.3 The cost axis *(non-negotiable)*
+Today every candidate is `:free`, so `λ·Cost` is inert and the cost-savings thesis is **literally untested**.
+- [ ] Put **≥3 real price tiers** in the candidate set: SLM (cheap), mid, and **one real paid frontier model** (GPT-4o / Claude / Gemini Pro class).
+- [ ] This is the only way to compute the headline: *"X% of frontier quality at Y% of frontier cost."* It requires relaxing the "free models only" constraint for the oracle build — decide the budget explicitly.
+
+### 5.4 Metrics & thresholds that constitute a defensible claim
+- [ ] **Regret vs oracle** with a 95% bootstrap CI over items (not a point estimate).
+- [ ] **Cost–quality Pareto**: router sits on/above the frontier of fixed baselines (always-SLM / always-mid / always-frontier) — "no fixed model dominates us."
+- [ ] **Headline**: quality retained vs frontier alongside cost reduction vs frontier. Candidate target ≈ **≥95% frontier quality at ≤40% frontier cost** — pick from the data, don't reverse-engineer.
+- [ ] **Held-out ECE ≤ ~0.05** with a reliability diagram (train ECE alone proves nothing; current train ECE = 0.041).
+- [ ] **Decisively beat naive baselines** — random and confidence-threshold cascade must lose by more than the noise band. Current red flag: random ties always-SLM (0.931 vs 0.931) — must be cleared.
+
+### 5.5 Methodology rigor (what a reviewer will attack)
+- [ ] Evaluate the promoted policy **only on held-out items** it never trained on; holdout ≥100 items for stable numbers.
+- [ ] **Validate the DR-FQE estimator**: the last run had only 8 holdout items. With 300+ items and real logged-vs-greedy disagreement, confirm the DR estimate tracks actual on-policy regret. Until then the promotion gate is unvalidated.
+- [ ] Report **mean ± std over ≥3 seeds** for the split.
+
+**Claim gate (all must hold):** (1) 4–5 datasets incl. GPQA + HumanEval; (2) ≥300 fully-covered items/dataset; (3) ≥3 real price tiers incl. one paid frontier; (4) held-out regret + Pareto + ECE with bootstrap CIs over ≥3 seeds; (5) decisively beats random and cascade. **Highest-leverage next step: GPQA + a paid frontier tier in the oracle** — that turns "SLM ties random on easy MCQs" into a real cost-savings story with an escalation signal.
+
+---
+
 ## Recommended immediate next steps (both low-token)
 
 Do the offline, near-free things first to de-risk before spending API budget:

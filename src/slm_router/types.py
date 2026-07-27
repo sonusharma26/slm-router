@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Tier = Literal["SLM", "small", "frontier"]
+Provider = Literal["openrouter", "google"]
 
 
 class Query(BaseModel):
@@ -28,6 +29,7 @@ class ModelSpec(BaseModel):
     id: str
     name: str
     tier: Tier
+    provider: Provider = "openrouter"
     price_in_per_m: float
     price_out_per_m: float
     context_len: int

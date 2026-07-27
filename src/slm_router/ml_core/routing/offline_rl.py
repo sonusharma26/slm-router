@@ -103,9 +103,23 @@ class OfflineRLPolicy(RoutingPolicy):
         ctx: np.ndarray,
         candidates: list[ModelSpec],
     ) -> RouteDecision:
-        """Greedy Q-maximising arm selection."""
+        """Greedy Q-maximising arm selection.
+
+        Raises
+        ------
+        ValueError
+            If ``len(candidates)`` does not exactly match ``self.n_arms``.
+            Silently truncating (or ignoring extra candidates) would produce
+            a selection over the wrong action space, so a mismatch is
+            treated as a caller error rather than tolerated.
+        """
         x = np.asarray(ctx, dtype=np.float32).ravel()
-        n = min(len(candidates), self.n_arms)
+        if len(candidates) != self.n_arms:
+            raise ValueError(
+                f"OfflineRLPolicy.select() expected {self.n_arms} candidates "
+                f"(n_arms={self.n_arms}) but received {len(candidates)}."
+            )
+        n = self.n_arms
         q_vals = [self._q_value(i, x) for i in range(n)]
         best = int(np.argmax(q_vals))
         model = candidates[best]
@@ -122,6 +136,17 @@ class OfflineRLPolicy(RoutingPolicy):
 
     def update(self, trace: RunTrace) -> None:  # type: ignore[override]
         """No-op at inference; use :meth:`fit` for batch offline updates."""
+
+    def training_readiness(self) -> tuple[bool, str | None]:
+        """Return whether every configured arm has enough fitted support."""
+        unsupported = [
+            f"arm {arm}: {int(count)}/{_MIN_SUPPORT}"
+            for arm, count in enumerate(self._support_counts)
+            if count < _MIN_SUPPORT or self._q_funcs[arm] is None
+        ]
+        if unsupported:
+            return False, "insufficient per-arm support (" + ", ".join(unsupported) + ")"
+        return True, None
 
     # ------------------------------------------------------------------
     # Offline training
@@ -190,31 +215,69 @@ class OfflineRLPolicy(RoutingPolicy):
     # ------------------------------------------------------------------
 
     def fqe_value(self, traces: Sequence[RunTrace]) -> float:
-        """Estimated on-policy value via Fitted Q Evaluation.
+        """Doubly-robust off-policy value estimate over logged traces.
 
-        Computes mean Q(x, greedy_arm) over the provided traces using the
-        already-fitted Q-functions.  Used as a promotion gate: the offline
-        policy is promoted to production only if ``fqe_value`` exceeds a
-        threshold.
+        For each trace we have a logged context ``x``, a logged action
+        ``a_log`` (``trace.arm_index``), and a realised reward ``r`` computed
+        the same way :meth:`fit` computes it (via
+        :func:`~slm_router.ml_core.routing.reward.compute_reward`). The
+        target (greedy) policy is deterministic: ``a_greedy =
+        argmax_a Q(x, a)``, using :meth:`_q_value` so the low-support penalty
+        is applied consistently with training and inference.
+
+        The per-trace doubly-robust estimate is
+
+        .. math::
+
+            \\hat{v}(x) = Q(x, a_{greedy}) +
+                \\mathbb{1}[a_{log} = a_{greedy}] \\cdot (r - Q(x, a_{log}))
+
+        i.e. the direct-method value ``Q(x, a_greedy)`` corrected by the
+        logged reward whenever the logging policy happened to take the same
+        action the greedy target policy would take (the importance weight
+        for a deterministic target policy is 1 in that case and 0
+        otherwise). This is no longer a pure optimistic upper bound: unlike
+        ``max_a Q(x, a)`` alone, it is anchored back to observed rewards
+        whenever logged and greedy actions coincide.
 
         Parameters
         ----------
         traces:
-            Evaluation traces (held-out or from a simulator).
+            Evaluation traces (held-out or from a simulator). Traces whose
+            ``arm_index`` falls outside ``[0, n_arms)`` are skipped, matching
+            :meth:`fit`.
 
         Returns
         -------
         float
-            Mean estimated Q-value across traces.
+            Mean doubly-robust value estimate across traces.
         """
         if not traces:
             return 0.0
 
         values: list[float] = []
         for tr in traces:
+            a_log = int(getattr(tr, "arm_index", 0))
+            if a_log < 0 or a_log >= self.n_arms:
+                continue
+
             ctx = np.asarray(getattr(tr, "context", np.zeros(self.dim)), dtype=np.float32)
-            n = self.n_arms
-            q_vals = [self._q_value(i, ctx) for i in range(n)]
-            values.append(max(q_vals))
+            quality = float(getattr(tr, "quality", 0.0))
+            cost = float(getattr(tr, "cost_usd", 0.0))
+            latency = float(getattr(tr, "latency_ms", 0.0))
+            r = compute_reward(
+                quality, cost, latency,
+                self.lam, self.beta, self.correctness_weight,
+            )
+
+            q_vals = [self._q_value(i, ctx) for i in range(self.n_arms)]
+            a_greedy = int(np.argmax(q_vals))
+
+            dm = q_vals[a_greedy]
+            correction = (r - q_vals[a_log]) if a_log == a_greedy else 0.0
+            values.append(dm + correction)
+
+        if not values:
+            return 0.0
 
         return float(np.mean(values))

@@ -8,6 +8,7 @@ paths:
   data_dir: data
   results_dir: results
   traces_dir: data/traces
+  models_dir: models
 
 # Datasets to evaluate (v0: mmlu + gsm8k).
 datasets:
@@ -16,12 +17,18 @@ datasets:
 
 dataset_limit: 50          # deterministic stratified subsample per dataset
 dataset_seed: 13
+router_holdout_fraction: 0.2
+minimum_holdout_items: 20
+slm_quality_tolerance: 0.05
 
 # Candidate models the router may choose among (subset of models.yaml ids).
+# These OpenRouter models are explicitly free-tier endpoints. The client paces
+# requests below OpenRouter's free-tier limit; their registry prices are zero.
 candidate_models:
-  - microsoft/phi-3.5-mini-128k-instruct
-  - openai/gpt-4o
+  - nvidia/nemotron-nano-9b-v2:free
+  - openai/gpt-oss-20b:free
 
-# LLM-as-judge for open-ended scoring.
-judge_model: openai/gpt-4o
+# LLM-as-judge uses OpenRouter as well, so this evidence workflow makes no
+# direct Gemini API calls.
+judge_model: openai/gpt-oss-20b:free
 judge_temperature: 0.0

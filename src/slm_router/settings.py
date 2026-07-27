@@ -9,8 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Loaded from environment / .env.
 
-    Most knobs use the SLM_ prefix (SLM_REQUESTS_PER_SECOND, etc.); the API key
-    keeps its conventional unprefixed name OPENROUTER_API_KEY.
+    Most knobs use the SLM_ prefix (SLM_REQUESTS_PER_SECOND, etc.); provider API
+    keys keep their conventional unprefixed names.
     """
 
     model_config = SettingsConfigDict(
@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     openrouter_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("OPENROUTER_API_KEY", "SLM_OPENROUTER_API_KEY"),
+    )
+    google_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "SLM_GOOGLE_API_KEY"),
     )
     requests_per_second: float = Field(
         default=4.0, validation_alias=AliasChoices("SLM_REQUESTS_PER_SECOND")

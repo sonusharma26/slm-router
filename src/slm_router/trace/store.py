@@ -51,9 +51,18 @@ class TraceStore:
         self.conn.executemany(sql, [_to_row(t) for t in traces])
         self.conn.commit()
 
-    def has_run(self, item_id: str, model: str, config_hash: str, run_kind: str) -> bool:
+    def has_run(
+        self,
+        item_id: str,
+        model: str,
+        config_hash: str,
+        run_kind: str,
+        successful_only: bool = False,
+    ) -> bool:
+        success_clause = " AND (error IS NULL OR error='')" if successful_only else ""
         cur = self.conn.execute(
-            "SELECT 1 FROM runs WHERE item_id=? AND model=? AND config_hash=? AND run_kind=? LIMIT 1",
+            "SELECT 1 FROM runs WHERE item_id=? AND model=? AND config_hash=? "
+            f"AND run_kind=?{success_clause} LIMIT 1",
             (item_id, model, config_hash, run_kind),
         )
         return cur.fetchone() is not None

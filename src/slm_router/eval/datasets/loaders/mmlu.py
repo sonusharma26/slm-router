@@ -5,7 +5,7 @@ import random
 from typing import Any
 
 from slm_router.eval.datasets.base import BenchmarkLoader
-from slm_router.eval.datasets.schema import EvalItem, TaskType
+from slm_router.eval.datasets.schema import EvalItem, TaskType, stable_item_id
 
 _LETTERS = ["A", "B", "C", "D"]
 _CHOICE_KEYS = ["A", "B", "C", "D"]
@@ -59,7 +59,7 @@ class MMLULoader(BenchmarkLoader):
                 "Install it with: pip install datasets"
             ) from exc
 
-        ds = load_dataset(self.HF_DATASET, self.HF_CONFIG, split=split, trust_remote_code=True)
+        ds = load_dataset(self.HF_DATASET, self.HF_CONFIG, split=split)
 
         if limit is None:
             raw_items = list(ds)
@@ -85,6 +85,7 @@ class MMLULoader(BenchmarkLoader):
         )
 
         return EvalItem(
+            item_id=stable_item_id(self.name, query),
             dataset=self.name,
             task_type=self.task_type,
             query=query,
