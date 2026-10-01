@@ -1,0 +1,25 @@
+# Functional-routing pilot only. It intentionally cannot issue a quality certificate.
+policy_id: nvidia-live-pilot
+version: "1"
+minimum_quality: 0.0
+cost:
+  expected_max: 0.0
+  absolute_max: 0.0
+latency:
+  p95_max_ms: 120000
+privacy:
+  providers: [nvidia-build]
+  boundary: nvidia-build
+plans:
+  allowed: [direct, abstain]
+  max_calls: 1
+  max_candidates: 16
+evidence:
+  require_certificate: false
+  min_samples: 1
+  max_age_seconds: 3600
+  certificate_ttl_seconds: 300
+  quality_risk: 0.05
+  latency_risk: 0.05
+objective: latency
+on_infeasible: abstain

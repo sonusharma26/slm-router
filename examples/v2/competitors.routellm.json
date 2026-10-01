@@ -1,0 +1,11 @@
+[
+  {
+    "kind": "routellm",
+    "router": "mf",
+    "strong_model": "local-large",
+    "weak_model": "local-small",
+    "threshold": 0.5,
+    "model_mapping": {"local-large": "local-large", "local-small": "local-small"},
+    "overhead_cost": null
+  }
+]

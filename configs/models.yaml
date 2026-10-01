@@ -2,20 +2,20 @@
 # reconciled against OpenRouter usage.cost at runtime where available).
 # tier: SLM | small | frontier
 models:
-  - id: nvidia/nemotron-nano-9b-v2:free
-    name: nemotron-nano-9b
-    tier: SLM
+  - id: nvidia/nemotron-3.5-lightning:free
+    name: nemotron-3.5-lightning
+    tier: small
     price_in_per_m: 0.0
     price_out_per_m: 0.0
-    context_len: 128000
+    context_len: 1000000
     supports_logprobs: false
 
-  - id: openai/gpt-oss-20b:free
-    name: gpt-oss-20b
+  - id: google/gemma-4-26b-a4b-it:free
+    name: gemma-4-26b-a4b-it
     tier: frontier
     price_in_per_m: 0.0
     price_out_per_m: 0.0
-    context_len: 131072
+    context_len: 262144
     supports_logprobs: false
 
   - id: microsoft/phi-4

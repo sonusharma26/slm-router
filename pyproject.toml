@@ -1,53 +1,86 @@
 [project]
 name = "slm-router"
-version = "0.1.0"
-description = "Self-Improving Model Router for SLM-LLM Systems"
+version = "2.0.0a2"
+description = "Evidence-driven bounded inference planning, adaptive measurement, and reproducible router benchmarks"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
-exclude-newer = "7 days"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["llm", "slm", "model-routing", "inference", "evaluation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
 dependencies = [
-    "httpx>=0.28.0",
-    "tenacity>=9.0.0",
-    "diskcache>=5.6.0",
-    "aiolimiter>=1.2.0",
-    "pydantic>=2.10.0",
-    "pydantic-settings>=2.7.0",
-    "pyyaml>=6.0.2",          # Patched micro-version
-    "typer>=0.15.0",
-    "fastapi>=0.115.0",       # Resolves older web endpoint flaws
-    "uvicorn[standard]>=0.34.0", # Critical security baseline
-    "numpy>=2.2.0",           # Bumps up to modern major data standards
-    "scipy>=1.15.0",
-    "pandas>=2.2.3",
-    "scikit-learn>=1.6.0",
-    "sentence-transformers>=3.3.0",
-    "torch>=2.5.0",           # Patched heavy-compute safety floor
-    "datasets>=3.2.0",
-    "matplotlib>=3.10.0",
-    "tqdm>=4.67.0",
+    "httpx>=0.28.1,<1",
+    "pydantic>=2.13.5,<3",
+    "pyyaml>=6.0.3,<7",
+    "typer>=0.27.2,<1",
+
+    "fastapi>=0.141.1,<1",
+
+    # Explicit security floor.
+    "starlette>=1.3.0,<2",
+
+    "uvicorn>=0.54.0,<1",
+    "jsonschema>=4.26,<5",
 ]
 
 [project.optional-dependencies]
-obs = [
-    "opentelemetry-sdk>=1.30.0",
+
+dev = [
+    "build>=1.3,<2",
+    "pytest>=9.0.3,<10",
+    "pytest-asyncio>=0.25,<2",
+    "respx>=0.22,<1",
+    "ruff>=0.9,<1",
 ]
 
-[dependency-groups]
-dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.25.0",
-    "respx>=0.22.0",
-    "ruff>=0.9.0",
-    "mypy>=1.14.0",
-    "ipykernel>=6.29.5",
+legacy = [
+    "tenacity>=9,<10",
+    "diskcache>=5.6,<6",
+    "aiolimiter>=1.2,<2",
+
+    "pydantic-settings>=2.15,<3",
+
+    "numpy>=2.2,<3",
+    "scipy>=1.15,<2",
+    "pandas>=2.2.3,<4",
+    "scikit-learn>=1.6,<2",
+
+    "sentence-transformers>=6.1,<7",
+    "torch>=2.14,<3",
+
+    "datasets>=3.2,<5",
+    "matplotlib>=3.10,<4",
+    "tqdm>=4.67,<5",
 ]
+
+obs = [
+    "opentelemetry-sdk>=1.30,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/sonusharma26/slm-router"
+Repository = "https://github.com/sonusharma26/slm-router"
+Issues = "https://github.com/sonusharma26/slm-router/issues"
+Changelog = "https://github.com/sonusharma26/slm-router/blob/main/CHANGELOG.md"
 
 [project.scripts]
-slm = "slm_router.cli:app"
+slm = "inference_control.cli:app"
+slm-legacy = "slm_router.cli:app"
 inference-control-smoke = "inference_control.smoke:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -58,5 +91,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 100
-target-version = "py312"
+line-length = 110
+target-version = "py311"

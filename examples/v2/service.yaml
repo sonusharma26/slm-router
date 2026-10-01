@@ -1,0 +1,16 @@
+# Paths are relative to this file. Replace placeholder deployments/prices before real use.
+endpoints: endpoints.json
+policy: policy.yaml
+ledger: ../../data/control-plane.sqlite3
+api_key_env: SLM_ROUTER_API_KEY
+# No initial map means fail-closed abstention until trusted measurements exist.
+# capability_map: your-application-map.json
+providers:
+  - endpoint_id: local-small
+    kind: openai_compatible
+    base_url: http://127.0.0.1:8001/v1
+    token_limit_field: max_tokens
+  - endpoint_id: local-large
+    kind: openai_compatible
+    base_url: http://127.0.0.1:8002/v1
+    token_limit_field: max_tokens

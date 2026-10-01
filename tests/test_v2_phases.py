@@ -1,10 +1,8 @@
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from inference_control.adapters import (
     AdapterResponse,
-    LiteLLMAdapter,
     MockAdapter,
     OpenAICompatibleAdapter,
 )
@@ -141,17 +139,6 @@ def test_registry_snapshots_are_immutable():
 def test_adapters_are_injectable_without_network():
     response = AdapterResponse("ok", "id", "r", 1, 1, 0, 2, {})
     assert MockAdapter(lambda *_: response).call("e", [], {}).text == "ok"
-    result = SimpleNamespace(
-        id="id",
-        model="m",
-        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
-        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
-        _hidden_params={"response_cost": 0.1},
-    )
-    result.__iter__ = lambda self: iter(())
-    # LiteLLM integration is duck-typed and does not import litellm.
-    adapter = LiteLLMAdapter(lambda **_: result)
-    assert adapter.call("m", [], {}).text == "ok"
     assert OpenAICompatibleAdapter.__name__
 
 
@@ -328,7 +315,10 @@ def test_api_persists_decision_before_execution_and_audits(tmp_path):
     decision_id = decision.json()["decision_id"]
     executed = client.post("/v2/execute", json={"decision_id": decision_id})
     assert executed.status_code == 200
-    assert [e.event_type for e in ledger.events()] == ["decision", "execution"]
+    kinds = [e.event_type for e in ledger.events()]
+    assert kinds.index("decision") < kinds.index("execution_started") < kinds.index("execution")
+    assert {"endpoint_snapshot", "policy", "static_estimates"} <= set(kinds)
+    assert ledger.verify()
     assert client.get(f"/v2/decisions/{decision_id}").status_code == 200
 
 

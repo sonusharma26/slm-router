@@ -1,0 +1,18 @@
+# Run scripts/run_nvidia_live_pilot.py first. It writes the small pilot map named below.
+# Produced by scripts/run_nvidia_live_pilot.py; retains an observed revision if NVIDIA returned one.
+endpoints: ../../results/nvidia-live-pilot/endpoints.json
+policy: policy-live-pilot.yaml
+capability_map: ../../results/nvidia-live-pilot/capability-map.json
+ledger: ../../results/nvidia-live-pilot/service.sqlite3
+api_key_env: SLM_ROUTER_API_KEY
+providers:
+  - endpoint_id: nvidia-fast
+    kind: openai_compatible
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    token_limit_field: max_tokens
+  - endpoint_id: nvidia-strong
+    kind: openai_compatible
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY
+    token_limit_field: max_tokens

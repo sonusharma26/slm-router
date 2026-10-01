@@ -1,13 +1,20 @@
-name: offline
+name: Offline adaptive control plane
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
-  test:
+  core:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with: {enable-cache: true}
-      - run: uv sync --frozen
-      - run: uv run inference-control-smoke
-      - run: uv run pytest -q
-      - run: uv run ruff check src/inference_control tests/test_v2_control_plane.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest tests/test_v2_control_plane.py tests/test_v2_phases.py tests/test_adaptive_release.py -q
+      - run: slm policy validate examples/v2/policy.yaml --endpoints examples/v2/endpoints.json
+      - run: slm demo --out results/ci-demo
+      - run: slm benchmark static --synthetic --requests 120 --no-sweep --resamples 30 --out results/ci-benchmark

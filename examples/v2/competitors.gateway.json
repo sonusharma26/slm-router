@@ -1,0 +1,10 @@
+[
+  {
+    "kind": "vllm",
+    "base_url": "http://127.0.0.1:8801/v1",
+    "router_model": "auto",
+    "model_mapping": {"local-small": "local-small", "local-large": "local-large"},
+    "replay_backend_confirmed": true,
+    "classifier_cost": null
+  }
+]

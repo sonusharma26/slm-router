@@ -25,10 +25,10 @@ slm_quality_tolerance: 0.05
 # These OpenRouter models are explicitly free-tier endpoints. The client paces
 # requests below OpenRouter's free-tier limit; their registry prices are zero.
 candidate_models:
-  - nvidia/nemotron-nano-9b-v2:free
-  - openai/gpt-oss-20b:free
+  - nvidia/nemotron-3.5-lightning:free
+  - google/gemma-4-26b-a4b-it:free
 
 # LLM-as-judge uses OpenRouter as well, so this evidence workflow makes no
 # direct Gemini API calls.
-judge_model: openai/gpt-oss-20b:free
+judge_model: google/gemma-4-26b-a4b-it:free
 judge_temperature: 0.0

@@ -1,0 +1,52 @@
+[
+  {
+    "schema_version": "2.0",
+    "endpoint_id": "local-small",
+    "provider": "local",
+    "upstream_model": "local-small",
+    "revision": "manual-placeholder-r1",
+    "region": "local",
+    "deployment": "default",
+    "modalities": [
+      "text"
+    ],
+    "capabilities": [],
+    "context_window": 8192,
+    "config_hash": "operator-must-verify",
+    "price_version": "placeholder-p1",
+    "input_price_per_million": 0.5,
+    "output_price_per_million": 1.0,
+    "available": true,
+    "healthy": true,
+    "governance": [
+      "local"
+    ],
+    "inference_config": {},
+    "input_token_overhead": 0
+  },
+  {
+    "schema_version": "2.0",
+    "endpoint_id": "local-large",
+    "provider": "local",
+    "upstream_model": "local-large",
+    "revision": "manual-placeholder-r1",
+    "region": "local",
+    "deployment": "default",
+    "modalities": [
+      "text"
+    ],
+    "capabilities": [],
+    "context_window": 8192,
+    "config_hash": "operator-must-verify",
+    "price_version": "placeholder-p1",
+    "input_price_per_million": 3.0,
+    "output_price_per_million": 6.0,
+    "available": true,
+    "healthy": true,
+    "governance": [
+      "local"
+    ],
+    "inference_config": {},
+    "input_token_overhead": 0
+  }
+]

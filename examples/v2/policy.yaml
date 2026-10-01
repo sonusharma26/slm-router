@@ -1,0 +1,24 @@
+# A configuration example, not a statistical feasibility assertion.
+policy_id: local-policy
+version: "1"
+minimum_quality: 0.90
+cost:
+  expected_max: 0.01
+  absolute_max: 0.03
+latency:
+  p95_max_ms: 2500
+privacy:
+  providers: [local]
+  boundary: local
+plans:
+  allowed: [direct, abstain]
+  max_calls: 1
+  max_candidates: 128
+evidence:
+  require_certificate: true
+  min_samples: 30
+  max_age_seconds: 86400
+  certificate_ttl_seconds: 3600
+  quality_risk: 0.05
+  latency_risk: 0.05
+on_infeasible: abstain

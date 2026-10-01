@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 
@@ -47,9 +45,13 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return ex / ex.sum(axis=-1, keepdims=True)
 
 
-def _nll_scalar(log_temp: float, logits: np.ndarray, labels: np.ndarray) -> float:
+def _nll_scalar(log_temp: float | np.ndarray, logits: np.ndarray, labels: np.ndarray) -> float:
     """Negative log-likelihood for a single temperature (numpy)."""
-    T = max(float(np.exp(log_temp)), 1e-6)
+    # SciPy passes a one-element ndarray even for a scalar optimization
+    # variable. Extract that scalar explicitly; direct ndarray-to-float
+    # conversion is no longer supported by recent NumPy releases.
+    log_temp_value = np.asarray(log_temp, dtype=np.float64).item()
+    T = max(float(np.exp(log_temp_value)), 1e-6)
     probs = _softmax(logits / T)
     # Clip for numerical stability
     n = len(labels)
