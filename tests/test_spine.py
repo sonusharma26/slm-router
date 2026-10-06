@@ -20,11 +20,11 @@ def test_config_loads():
 
 def test_registry_cost_math():
     reg = ModelRegistry.from_yaml("configs/models.yaml")
-    spec = reg.get("openai/gpt-4o")
-    assert spec.tier == "frontier"
-    # 1M in + 1M out at $2.50/$10.00 -> $12.50
-    cost = reg.cost("openai/gpt-4o", Usage(prompt_tokens=1_000_000, completion_tokens=1_000_000))
-    assert abs(cost.total_usd - 12.50) < 1e-6
+    spec = reg.get("openai/gpt-oss-20b")
+    assert spec.tier == "SLM"
+    # The NVIDIA Build Developer Program model registry reserves zero spend.
+    cost = reg.cost("openai/gpt-oss-20b", Usage(prompt_tokens=1_000_000, completion_tokens=1_000_000))
+    assert cost.total_usd == 0.0
 
 
 def test_registry_by_tier_sorted():

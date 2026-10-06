@@ -22,13 +22,12 @@ minimum_holdout_items: 20
 slm_quality_tolerance: 0.05
 
 # Candidate models the router may choose among (subset of models.yaml ids).
-# These OpenRouter models are explicitly free-tier endpoints. The client paces
-# requests below OpenRouter's free-tier limit; their registry prices are zero.
+# These NVIDIA Build Developer Program endpoints are free for prototyping; the
+# registry therefore reserves zero token spend for them.
 candidate_models:
-  - nvidia/nemotron-3.5-lightning:free
-  - google/gemma-4-26b-a4b-it:free
+  - openai/gpt-oss-20b
+  - google/gemma-4-31b-it
 
-# LLM-as-judge uses OpenRouter as well, so this evidence workflow makes no
-# direct Gemini API calls.
-judge_model: google/gemma-4-26b-a4b-it:free
+# LLM-as-judge uses the NVIDIA Build OpenAI-compatible endpoint.
+judge_model: google/gemma-4-31b-it
 judge_temperature: 0.0
