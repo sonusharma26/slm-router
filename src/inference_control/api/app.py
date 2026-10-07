@@ -111,6 +111,7 @@ class ControlPlane:
                       "slice_id":event["slice_id"],"reason":event["reason"]}
                 if item not in cmap.invalidations:cmap.invalidations.append(item);cmap._version=None
                 self.planner.certificates.invalidate_dependencies(event["endpoint_id"],tuple(event["metrics"]),event["slice_id"],event["reason"],at=datetime.fromisoformat(event["at"]))
+        self.drift.reconcile_latency()
         # Rebuild trusted learning rows after an outcome/checkpoint interruption.
         if self.planner.capability_map is not None:
             for saved in self.state.outcomes.values():
@@ -145,6 +146,7 @@ class ControlPlane:
 
     def decide(self, payload: DecideRequest) -> DecisionRecord:
         with self.lock:
+            self.drift.reconcile_latency()
             if payload.request.tenant_policy_id != payload.policy.policy_id:
                 raise ValueError("request tenant_policy_id does not match policy")
             prior=self.policies.get((payload.policy.policy_id,payload.policy.version))
@@ -156,6 +158,7 @@ class ControlPlane:
         if self.executor is None:raise ValueError("executor not configured")
         with self.lock:
             self.state.refresh()
+            self.drift.reconcile_latency()
             if decision_id not in self.decisions:raise KeyError(decision_id)
             if decision_id in self.state.execution_by_decision:return self.state.execution_by_decision[decision_id]
             decision=self.decisions[decision_id]
@@ -183,10 +186,7 @@ class ControlPlane:
         with self.lock:
             self.state.write("execution",record.model_dump(mode="json"),key=f"execution-final:{decision_id}")
             self.lifecycle.observe_execution(decision,record)
-            for e in ids if len(ids)==1 else ():
-                for slice_id in decision.request.traffic_slices or {"default"}:
-                    if record.accounting_complete:
-                        self.drift.observe(e,"latency",slice_id,record.total_latency_ms)
+            self.drift.observe_execution(decision,record,policy,observed_at=datetime.fromisoformat(event.occurred_at))
             return record
 
     def add_outcome(self, outcome: OutcomeRecord) -> OutcomeRecord:
@@ -230,7 +230,17 @@ class ControlPlane:
                     self.planner.certificates.invalidate_dependencies(endpoint_id,("quality","failure"),slice_id,
                                                                       "superseded_outcome")
         sample_id = f"outcome:{qualified.outcome_id}"
-        if sample_id in cmap.rows or not execution or not ids or quality is None or not qualified.training_eligible:
+        claim = self.state.claims.get(qualified.decision_id)
+        observed_at = claim["started_at"] if claim else None
+        prior = cmap.rows.get(sample_id)
+        if prior is not None:
+            if cmap.reconcile_outcome_time(sample_id, observed_at):
+                for endpoint_id in prior.endpoint_ids:
+                    for slice_id in prior.request.traffic_slices or {None}:
+                        self.planner.certificates.invalidate_dependencies(endpoint_id,tuple(sorted(prior.metrics)),
+                            slice_id,"outcome_evidence_time_reconciled")
+            return
+        if observed_at is None or not execution or not ids or quality is None or not qualified.training_eligible:
             return
         if qualified.disputed: return
         trust_until = None
@@ -246,14 +256,19 @@ class ControlPlane:
             quality=quality if execution.state=="completed" else 0.,
             cost=execution.realized_spend,latency_ms=execution.total_latency_ms,output_tokens=execution.output_tokens,
             failed=execution.state!="completed",split=split,evaluator_type=qualified.evaluator_type,
-            evaluator_version=qualified.evaluator_version,observed_at=qualified.evaluated_at,
+            evaluator_version=qualified.evaluator_version,observed_at=observed_at,
             trusted=True,trusted_until=trust_until,outcome_id=qualified.outcome_id,
             metrics=frozenset({"quality","failure","latency","cost"}) if execution.accounting_complete else frozenset({"quality","failure"}))
         cmap.add(row)
         # A joint plan outcome is not a marginal endpoint-quality label.
         if monitor and len(ids)==1:
             for slice_id in decision.request.traffic_slices or {"default"}:
-                self.drift.observe(ids[0],"quality",slice_id,row.quality)
+                if any(item["endpoint_id"] == ids[0] and "quality" in item["metrics"]
+                       and item["slice_id"] in {None,slice_id}
+                       and row.observed_at <= datetime.fromisoformat(item["at"])
+                       for item in cmap.invalidations):
+                    continue
+                self.drift.observe(ids[0],"quality",slice_id,row.quality,observed_at=row.observed_at)
 
     def dispute_outcome(self, outcome_id: str, reason: str):
         with self.lock:

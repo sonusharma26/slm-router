@@ -322,7 +322,8 @@ def test_budget_is_durable_atomic_and_conservative(tmp_path):
 
 def test_probe_failure_keeps_reservation_and_never_updates_map():
     planner=Planner([ep()],capability_map=evidence());ledger=SQLiteLedger(":memory:")
-    loop=ActiveMeasurementLoop(planner,DailyProbeBudget(ledger,max_dollars=1,max_calls=1))
+    loop=ActiveMeasurementLoop(planner,DailyProbeBudget(ledger,max_dollars=1,max_calls=1),
+                               recovery=DriftRecovery(planner,ControlState(ledger)))
     version=planner.map_version
     def failed(task):raise TimeoutError("may have spent money")
     result=loop.run([ProbeTask("probe","a",request())],policy(),failed,strategy="exhaustive")
@@ -458,7 +459,9 @@ def test_certificate_is_bound_to_exact_request_not_just_coarse_slice():
 
 def test_impact_probes_skip_stable_dominated_alternatives():
     endpoints=[ep(),ep("b",100.)];planner=Planner(endpoints,capability_map=evidence(endpoints))
-    loop=ActiveMeasurementLoop(planner,DailyProbeBudget(SQLiteLedger(":memory:"),max_dollars=5,max_calls=100))
+    ledger=SQLiteLedger(":memory:")
+    loop=ActiveMeasurementLoop(planner,DailyProbeBudget(ledger,max_dollars=5,max_calls=100),
+                               recovery=DriftRecovery(planner,ControlState(ledger)))
     ranks=loop.rank([ProbeTask("one","a",request()),ProbeTask("two","b",request())],policy())
     assert all(not row.could_change_decision for row in ranks)
 

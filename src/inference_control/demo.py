@@ -44,7 +44,7 @@ def run_demo(out):
     event=control.drift.refresh_endpoint(replacement)
     during=control.decide(DecideRequest(request=request.model_copy(update={"request_id":"during"}),policy=policy))
     budget=DailyProbeBudget(control.ledger,max_dollars=5,max_calls=100)
-    loop=ActiveMeasurementLoop(control.planner,budget,state=control.state)
+    loop=ActiveMeasurementLoop(control.planner,budget,recovery=control.drift,state=control.state)
     tasks=[]; rows={}
     for split,n in (("train",25),("calibration",75)):
         for i in range(n):

@@ -6,6 +6,10 @@ from typing import Any, Callable, Protocol
 import httpx
 
 
+class ProviderTimeout(TimeoutError):
+    pass
+
+
 @dataclass(frozen=True)
 class AdapterResponse:
     text: str | None
@@ -53,9 +57,12 @@ class OpenAICompatibleAdapter:
             config["max_tokens"] = config.pop("max_completion_tokens")
         timeout = float(config.pop("timeout", 60))
         started = perf_counter()
-        response = self.client.post(f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={"model":endpoint_id,"messages":messages,**config,"stream":False}, timeout=timeout)
+        try:
+            response = self.client.post(f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={"model":endpoint_id,"messages":messages,**config,"stream":False}, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            raise ProviderTimeout("provider transport timed out") from exc
         response.raise_for_status()
         data = response.json()
         latency = (perf_counter()-started)*1000

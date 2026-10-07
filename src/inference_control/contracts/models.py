@@ -296,6 +296,7 @@ class ExecutionRecord(FrozenContract):
     time_to_first_token_ms: float | None = None
     total_latency_ms: float = Field(default=0, ge=0)
     provider_errors: tuple[str, ...] = ()
+    timed_out_endpoint_ids: tuple[str, ...] = ()
     fallback_transitions: tuple[str, ...] = ()
     realized_spend: float = Field(default=0, ge=0)
     output_reference: str | None = None

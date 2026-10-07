@@ -87,7 +87,7 @@ class CertificateStore:
             cert = versions[-1]
             if endpoint_id not in cert.endpoint_ids or cert.invalidated_reason or (at is not None and cert.valid_from > at):
                 continue
-            if slice_id and slice_id not in cert.traffic_slices:
+            if slice_id and slice_id not in (cert.traffic_slices or ("default",)):
                 continue
             if set(metrics) & {"quality", "cost", "latency", "failure", "availability"}:
                 self.invalidate(key, reason)

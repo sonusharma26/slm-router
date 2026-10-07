@@ -56,15 +56,17 @@ def evaluate_router(router,dataset,policy,*,split="test"):
                     (r.latency_ms is None or r.latency_ms<=policy.deadline_ms)),default=0.)
         if choice.endpoint_id is None:
             quality,cost,latency,violation,shortfall=0.,choice.overhead_cost,None,False,False
+            output_budget_mismatch = False
         else:
             key=(query.request.request_id,choice.endpoint_id)
             if key not in lookup:raise ValueError("router selected outside the identical model pool")
             row=lookup[key]
             ep=next(e for e in dataset.endpoints if e.endpoint_id==choice.endpoint_id)
             quality=row.quality
+            output_budget_mismatch = row.output_tokens > query.request.max_output_tokens
             cost=row.cost+choice.overhead_cost if choice.overhead_cost is not None else None
             latency=row.latency_ms+choice.overhead_ms if row.latency_ms is not None else None
-            violation=bool(eligibility_reasons(ep,query.request,policy)) or row.failed or (
+            violation=bool(eligibility_reasons(ep,query.request,policy)) or row.failed or output_budget_mismatch or (
                 cost is not None and cost>policy.max_absolute_spend) or (latency is not None and latency>policy.deadline_ms)
             shortfall=quality<policy.minimum_quality
         records.append({"request_id":query.request.request_id,"group_id":query.group_id,
@@ -73,6 +75,7 @@ def evaluate_router(router,dataset,policy,*,split="test"):
             "certified":choice.certificate_status=="current","quality":quality,"cost":cost,
             "latency_ms":latency,"routing_overhead_ms":choice.overhead_ms,
             "constraint_violation":violation,"quality_shortfall":shortfall,
+            "output_budget_mismatch":output_budget_mismatch,
             "regret":max(0.,oracle-quality),"plan_type":choice.plan_type,"metadata":choice.metadata})
     return records
 
@@ -148,6 +151,8 @@ def run_static(dataset:BenchmarkDataset,*,policy=None,seed=42,resamples=400,comp
     if any(v["known_cost_coverage"]<1 for v in results.values()):blockers.append("UNACCOUNTED_ROUTER_OVERHEAD_COST")
     if any(v["ci95"][0]<=0 for v in paired.values()):blockers.append("QUALITY_SUPERIORITY_NOT_ESTABLISHED_AT_THIS_OPERATING_POINT")
     blockers.append("MULTIPLE_DATASETS_SEEDS_AND_MATCHED_COST_INFERENCE_REQUIRED_FOR_BROAD_CLAIMS")
+    from inference_control.benchmarks.diagnostics import diagnose_quality
+    quality_diagnostics = diagnose_quality(slm, dataset, policy)
     return {"schema":"slm-benchmark-v1","kind":"static","generated_at":datetime.now(timezone.utc).isoformat(),
         "environment":environment(),"dataset":dataset.name,"evidence_kind":dataset.evidence_kind,"dataset_hash":dataset.fingerprint,
         "split_hash":dataset.split_hash,"seed":seed,"python":sys.version,"platform":platform.platform(),
@@ -155,7 +160,8 @@ def run_static(dataset:BenchmarkDataset,*,policy=None,seed=42,resamples=400,comp
         "policy":policy.model_dump(mode="json"),"policy_hash":digest(policy),"status":status,
         "results":results,"paired_quality_differences":paired,"operating_points":points,
         "pareto_frontier":matched_frontier(points),"matched_comparisons":matched,
-        "claim_gate":{"passed":False,"blockers":blockers},"records":records}
+        "claim_gate":{"passed":False,"blockers":blockers},"records":records,
+        "quality_diagnostics":quality_diagnostics}
 
 
 def write_report(report,out):
@@ -171,6 +177,18 @@ def write_report(report,out):
             lines.append(f"| {name} | {r['quality_all_requests']:.4f} | {cost} | {r['abstention_rate']:.1%} | {r['certificate_coverage']:.1%} | {r['routing_overhead_p95_ms']:.3f} |")
         lines += ["","## External competitor status",""]
         lines += [f"- {n}: {report['status'][n]['state']}" for n in EXTERNALS]
+        if "quality_diagnostics" in report:
+            diagnostic = report["quality_diagnostics"]
+            lines += ["", "## Quality bound diagnosis", "",
+                      f"Unchanged quality target: {diagnostic['quality_target']}; estimator: {diagnostic['method']}.", "",
+                      "| Endpoint | Local calibration n | Lower bound range | Sample-size blocked candidates | Train-only calibration MAE | Constant baseline MAE |",
+                      "|---|---|---|---:|---|---|"]
+            for name, row in diagnostic["endpoints"].items():
+                error = row["calibration_prediction_error"]
+                lines.append(f"| {name} | {row['calibration_size_range']} | {row['quality_lower_range']} | {row['sample_size_blocked_candidates']} | {error['mae']} | {error['constant_training_mean_mae']} |")
+            lines += ["", "Sample-size blocked means even perfect calibration scores cannot reach the target at the current n.",
+                      "Per-candidate means, penalties, clamp effects and sample requirements are in `report.json`.",
+                      "Prediction errors are descriptive; this is not a per-response coverage claim or permission to tune on test labels."]
         lines += ["","## Claim gate","",*['- '+b for b in report["claim_gate"]["blockers"]]]
     else:
         lines += ["See `report.json` for per-scenario, per-budget measurements and event traces."]

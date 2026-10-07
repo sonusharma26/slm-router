@@ -34,6 +34,7 @@ class Executor:
 
     def execute(self, decision: DecisionRecord, *, policy=None, endpoints=None, certificates=None,
                 messages=None, response_config=None, result_sink: Callable | None = None) -> ExecutionRecord:
+        from inference_control.adapters.providers import ProviderTimeout
         plan, started = decision.selected_plan, perf_counter()
         if plan.plan_type == "abstain":
             return ExecutionRecord(decision_id=decision.decision_id,state="abstained")
@@ -66,7 +67,7 @@ class Executor:
                 raise TimeoutError("execution deadline exhausted")
         guard()
         adapter = self.adapter.for_request(decision.request,messages,response_config) if hasattr(self.adapter,"for_request") else self.adapter
-        results, errors, transitions, violations = [], [], [], []
+        results, errors, transitions, violations, timed_out = [], [], [], [], []
         attempts, accounted = 0, True
         chosen = None
         def invoke(step):
@@ -93,6 +94,7 @@ class Executor:
                     try: accept(step,future.result())
                     except Exception as exc:
                         errors.append(f"{step.endpoint_id}:{type(exc).__name__}")
+                        if isinstance(exc,ProviderTimeout): timed_out.append(step.endpoint_id)
                         accounted = False
             if results:
                 select = next(s for s in plan.steps if isinstance(s,Select))
@@ -126,6 +128,7 @@ class Executor:
                     chosen = result
                 except Exception as exc:
                     errors.append(f"{step.endpoint_id}:{type(exc).__name__}")
+                    if isinstance(exc,ProviderTimeout): timed_out.append(step.endpoint_id)
                     accounted = False  # The provider may have billed a timed-out/erroring request.
                     transitions.append(f"call_failed:{step.endpoint_id}")
                     chosen = None
@@ -146,6 +149,7 @@ class Executor:
             input_tokens=sum(r.input_tokens for r in results), output_tokens=sum(r.output_tokens for r in results),
             time_to_first_token_ms=min(ttft) if ttft else None, total_latency_ms=elapsed,
             provider_errors=tuple(errors), fallback_transitions=tuple(transitions), realized_spend=spend,
+            timed_out_endpoint_ids=tuple(sorted(set(timed_out))),
             output_reference=chosen.output_reference if chosen else None,
             selected_endpoint_id=chosen.endpoint_id if chosen else None,
             attempted_calls=attempts, reserved_spend=plan.max_spend, accounting_complete=accounted,

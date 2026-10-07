@@ -1,5 +1,6 @@
 """Durable read models reconstructed from immutable events, no pickle or opaque state."""
 from __future__ import annotations
+from datetime import datetime
 from inference_control.contracts import EndpointSnapshot, PolicySpec, DecisionRecord, ExecutionRecord, OutcomeRecord
 from inference_control.policies import CertificateStore
 from inference_control.util import digest
@@ -26,6 +27,8 @@ class ControlState:
         self.lifecycle: dict[str, dict] = {}
         self.trust: dict[str, dict] = {}
         self.detectors: dict[str, dict] = {}
+        self.operational_counters: dict[str, dict] = {}
+        self.latency_receipts: set[str] = set()
         self.recovered_events: set[str] = set()
         if not ledger.verify():
             raise ValueError("ledger hash-chain verification failed")
@@ -58,7 +61,7 @@ class ControlState:
             row = DecisionRecord.model_validate(p)
             self.decisions[row.decision_id] = row
         elif kind == "execution_started":
-            self.claims[p["decision_id"]] = p
+            self.claims[p["decision_id"]] = {**p, "started_at":datetime.fromisoformat(event.occurred_at)}
         elif kind == "execution":
             row = ExecutionRecord.model_validate(p)
             self.executions[row.execution_id] = row
@@ -74,6 +77,8 @@ class ControlState:
         elif kind == "lifecycle": self.lifecycle[p["policy_id"]] = p
         elif kind == "evaluator_trust": self.trust[p["evaluator_version"]] = p
         elif kind == "drift_detector": self.detectors[p["key"]] = p
+        elif kind == "latency_counter": self.operational_counters[p["key"]] = p
+        elif kind == "latency_receipt": self.latency_receipts.add(p["source_id"])
         elif kind == "recovery": self.recovered_events.add(p["event_id"])
         self.sequence = event.sequence
 

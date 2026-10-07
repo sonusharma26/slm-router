@@ -16,7 +16,8 @@ from inference_control.benchmarks.metrics import summarize
 from inference_control.capability.conditional import EvidenceObservation
 from inference_control.probes.active import ActiveMeasurementLoop,DailyProbeBudget,ProbeTask
 from inference_control.ledger import SQLiteLedger
-from inference_control.drift.recovery import DriftRecovery
+from inference_control.ledger.state import ControlState
+from inference_control.drift.recovery import DriftRecovery,EndpointLatency
 from inference_control.util import digest
 
 
@@ -87,18 +88,20 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
         # All strategies begin with the same full initial evidence; refresh budgets are additional.
         if strategy=="cheapest":
             baseline=Baseline("cheapest");baseline.fit(*split_data(data,{"train"}))
-        recovery=DriftRecovery(router.planner,window=8,minimum_shift=.1)
+        ledger=SQLiteLedger(":memory:")
+        state=ControlState(ledger)
+        state.store_planner(router.planner,policy)
+        recovery=DriftRecovery(router.planner,state,window=8,minimum_shift=.1)
         for ep in data.endpoints:
             for task in ("code","math"):
                 refs=reference_rows.get((ep.endpoint_id,task),[])
                 if len(refs)>=8:
                     recovery.set_reference(ep.endpoint_id,"quality",task,[r.quality for r in refs])
                     recovery.set_reference(ep.endpoint_id,"latency",task,[r.latency_ms for r in refs])
-        ledger=SQLiteLedger(":memory:")
         exhaustive_calls=steps*len(data.endpoints)
         calls=exhaustive_calls if strategy=="exhaustive" else math.floor(exhaustive_calls*probe_fraction)
         budget=DailyProbeBudget(ledger,max_dollars=100.,max_calls=calls)
-        loop=ActiveMeasurementLoop(router.planner,budget,seed=seed)
+        loop=ActiveMeasurementLoop(router.planner,budget,recovery=recovery,seed=seed)
         delayed=deque();records=[];events=[];last_snapshots=dict(world.endpoints)
         bad_after=0;first_detection=None;recovery_at=None;good_streak=0
         map_errors=[];error_observed=0;error_possible=0
@@ -118,9 +121,9 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
                 if strategy not in {"frozen","cheapest"}:
                     try:router.map.add(row)
                     except ValueError:pass
-                    for metric,value in (("quality",row.quality),("latency",row.latency_ms)):
-                        event=recovery.observe(row.endpoint_ids[0],metric,row.request.task_hint,value,at=time)
-                        if event:events.append({"step":t,**event})
+                    event=recovery.observe(row.endpoint_ids[0],"quality",row.request.task_hint,row.quality,
+                                           at=time,observed_at=row.observed_at)
+                    if event:events.append({"step":t,**event})
             if strategy not in {"frozen","cheapest"}:
                 # Same public query catalog and cap for every acquisition strategy.
                 probe_query=world.request(1_000_000+t)  # Independent measurement catalog; NEVER the current held-out request.
@@ -137,7 +140,9 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
                         evaluator_type="deterministic",evaluator_version="synthetic-rubric-v1",observed_at=time)
                 # Pace budget across time rather than spending all probes before the injected change.
                 permitted=math.floor((t+1)*calls/steps)-budget.usage(time)["calls_reserved"]
-                if permitted>0:loop.run(tasks,policy,measure,strategy=strategy,max_calls=permitted,at=time)
+                if permitted>0:
+                    measured=loop.run(tasks,policy,measure,strategy=strategy,max_calls=permitted,at=time)
+                    events.extend({"step":t,**event} for event in measured["drift_events"])
             choice=baseline.choose(query,tuple(world.endpoints.values()),policy) if strategy=="cheapest" else router.choose(query,tuple(world.endpoints.values()),policy)
             truths=[world.outcome(query.request,e,t) for e in world.endpoints]
             feasible=[r for r in truths if world.endpoints[r.endpoint_id].available and r.latency_ms<=policy.deadline_ms]
@@ -152,6 +157,11 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
                 "regret":max(0,oracle-quality),"step":t}
             records.append(record)
             if selected and strategy not in {"frozen","cheapest"}:
+                observation=EndpointLatency(source_id=f"serving:{strategy}:{t}",endpoint_id=selected.endpoint_id,
+                    capability_revision=world.endpoints[selected.endpoint_id].capability_revision,
+                    slice_id=query.request.task_hint,policy_hash=digest(policy),deadline_ms=policy.deadline_ms,
+                    observed_at=time,received_at=time,duration_ms=selected.latency_ms,completed=not selected.failed)
+                events.extend({"step":t,**event} for event in recovery.observe_latency(observation))
                 # Biased judge output is logged, but never promoted into trusted calibration.
                 biased=scenario=="biased_evaluator" and t>=inject_at
                 if biased:
@@ -209,18 +219,25 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
 
 def run_sparse(*,steps=80,seed=42,fractions=(.05,.1,.25,1.),initial_requests=1200,scenario="quality_minus20pct"):
     rows=[]
-    for fraction in fractions:
-        strategies=("impact","uncertainty","random") if fraction<1 else ("exhaustive",)
+    for fraction in dict.fromkeys((0., *fractions)):
+        strategies=("frozen",) if fraction==0 else (("impact","uncertainty","random") if fraction<1 else ("exhaustive",))
         report=run_dynamic(scenario=scenario,steps=steps,seed=seed,strategies=strategies,
                            probe_fraction=fraction,initial_requests=initial_requests)
         for strategy,r in report["results"].items():
+            serving_cost=sum(record["cost"] for record in r["records"])
+            known_cost=serving_cost+r["probe_budget"]["realized_known_cost"]
+            reserved_cost=serving_cost+r["probe_budget"]["dollars_reserved"]
             rows.append({"budget_fraction":fraction,"strategy":strategy,"actual_probe_calls":r["probe_budget"]["calls_reserved"],
                 "actual_probe_cost":r["probe_budget"]["realized_known_cost"],"reserved_probe_cost":r["probe_budget"]["dollars_reserved"],
                 "actual_refresh_fraction":r["refresh_call_fraction"],"capability_map_error":r["mean_capability_error"],"capability_error_observed_fraction":r["capability_error_observed_fraction"],
                 "mean_serving_cost":r["metrics"]["mean_cost"],
+                "total_serving_cost":serving_cost,"total_known_cost":known_cost,"total_reserved_cost":reserved_cost,
+                "mean_total_known_cost_per_request":known_cost/steps,
+                "known_probe_cost_coverage":r["probe_budget"]["known_cost_coverage"],
                 "routing_regret":r["metrics"]["mean_regret"],"quality_all_requests":r["metrics"]["quality_all_requests"],
                 "abstention_rate":r["metrics"]["abstention_rate"],"constraint_violation_rate":r["metrics"]["constraint_violation_rate"]})
     return {"schema":"slm-benchmark-v1","kind":"sparse","evidence_kind":"synthetic","environment":environment(),"initial_requests":initial_requests,"seed":seed,"steps":steps,"scenario":scenario,
         "results":rows,"hypothesis":"retain routing performance at <=25% exhaustive refresh calls",
         "hypothesis_status":"not_established_automatically; inspect replicated regret, coverage and total serving+probe spend",
+        "cost_accounting":"Known totals include realized serving and known probe cost; reserved totals include serving and probe reservations, including unknown billed outcomes. Shared initial evidence acquisition is excluded from both totals.",
         "exhaustive_denominator":"one refresh per endpoint per workload request; serving feedback reported separately"}

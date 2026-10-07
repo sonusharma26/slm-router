@@ -14,6 +14,55 @@ from inference_control.contracts import FrozenContract, RequestContext, Predicti
 from inference_control.util import digest
 
 
+QualityMethod = Literal["local-mean-hoeffding", "local-mean-kl"]
+QualityPredictor = Literal["local", "cohort-mean"]
+
+
+def binary_kl(observed: float, candidate: float) -> float:
+    if observed == candidate:
+        return 0.
+    if candidate in (0., 1.):
+        return math.inf
+    value = 0.
+    if observed > 0:
+        value += observed * (math.log(observed) - math.log(candidate))
+    if observed < 1:
+        value += (1-observed) * (math.log1p(-observed) - math.log1p(-candidate))
+    return max(0., value)
+
+
+def quality_interval(score_mean: float, n: int, alpha: float,
+                     method: QualityMethod = "local-mean-kl") -> tuple[float, float]:
+    if not 0 <= score_mean <= 1 or n < 0 or not 0 < alpha < 1:
+        raise ValueError("bounded mean, nonnegative sample count and risk in (0,1) required")
+    if method not in {"local-mean-hoeffding", "local-mean-kl"}:
+        raise ValueError("unknown quality bound method")
+    if n == 0:
+        return 0., 1.
+    if method == "local-mean-hoeffding":
+        radius = math.sqrt(math.log(2/alpha)/(2*n))
+        return max(0., score_mean-radius), min(1., score_mean+radius)
+    threshold = (math.log(2.) - math.log(alpha)) / n
+    # Spend less risk to keep floating-point inversion outside the exact confidence set.
+    threshold += max(1e-12, 32*math.ulp(threshold))
+    def lower_root(observed):
+        if observed == 0:
+            return 0.
+        if observed == 1:
+            return math.nextafter(math.exp(-threshold), 0.)
+        low, high = 0., observed
+        for _ in range(64):
+            middle = (low+high)/2
+            if middle == low or middle == high:
+                break
+            if binary_kl(observed, middle) > threshold:
+                low = middle
+            else:
+                high = middle
+        return math.nextafter(low, 0.)
+    return lower_root(score_mean), min(1., math.nextafter(1-lower_root(1-score_mean), 1.))
+
+
 @lru_cache(maxsize=1024)
 def quantile_tolerance_rank(n: int, quantile: float, alpha: float) -> int | None:
     """Exact binomial one-sided tolerance bound for an IID population quantile.
@@ -32,17 +81,19 @@ def quantile_tolerance_rank(n: int, quantile: float, alpha: float) -> int | None
     return None
 
 
-def stratum(request: RequestContext) -> str:
+def stratum(request: RequestContext, *, include_lengths: bool = True) -> str:
     """Exact semantic/governance fields and coarse length buckets; no output leakage."""
-    return digest({
+    fields = {
         "application": request.application_id, "task": request.task_hint,
         "slices": request.traffic_slices, "tags": request.tags,
         "modality": request.modality, "capabilities": request.required_capabilities,
         "feature_version": request.feature_version, "privacy": request.privacy_classification,
-        "input_bucket": int(math.log2(max(1, request.input_tokens))),
-        "output_bucket": int(math.log2(max(1, request.max_output_tokens))),
         "json_schema": request.structured_output_schema_hash, "tools": request.tool_schema_hash,
-    })
+    }
+    if include_lengths:
+        fields.update(input_bucket=int(math.log2(max(1, request.input_tokens))),
+                      output_bucket=int(math.log2(max(1, request.max_output_tokens))))
+    return digest(fields)
 
 
 class EvidenceObservation(FrozenContract):
@@ -85,6 +136,24 @@ class EvidenceObservation(FrozenContract):
         return self
 
 
+class QualityBoundDiagnostics(FrozenContract):
+    """Population confidence endpoints and the separate raw point forecast."""
+    method: QualityMethod = "local-mean-hoeffding"
+    predictor: QualityPredictor = "local"
+    raw_prediction: float | None = None
+    prediction_sample_size: int = 0
+    prediction_projection: float = 0.
+    lower_tail_risk: float | None = None
+    upper_tail_risk: float | None = None
+    training_mean: float | None
+    calibration_mean: float | None
+    hoeffding_radius: float | None
+    calibration_lower: float
+    training_mean_clamp: float
+    comparisons: int
+    effective_risk: float
+
+
 class EvidenceLineage(FrozenContract):
     target_id: str
     traffic_stratum: str
@@ -98,6 +167,7 @@ class EvidenceLineage(FrozenContract):
     measured_at: datetime
     age_seconds: float
     calibrated: bool
+    quality_diagnostics: QualityBoundDiagnostics | None = None
     trusted_until: datetime | None = None
     reasons: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = (
@@ -112,10 +182,18 @@ class EvidenceLineage(FrozenContract):
 
 
 class ConditionalCapabilityMap:
-    def __init__(self, *, k: int = 512, min_samples: int = 30, max_age_seconds: int = 86400):
+    def __init__(self, *, k: int = 512, min_samples: int = 30, max_age_seconds: int = 86400,
+                 quality_method: QualityMethod = "local-mean-kl",
+                 quality_predictors: dict[str, QualityPredictor] | None = None):
         if k < 1 or min_samples < 1 or max_age_seconds < 1:
             raise ValueError("positive estimator bounds required")
         self.k, self.min_samples, self.max_age_seconds = k, min_samples, max_age_seconds
+        if quality_method not in {"local-mean-kl", "local-mean-hoeffding"}:
+            raise ValueError("unknown quality bound method")
+        if any(mode not in {"local", "cohort-mean"} for mode in (quality_predictors or {}).values()):
+            raise ValueError("unknown quality point predictor")
+        self._quality_method = quality_method
+        self._quality_predictors = tuple(sorted((quality_predictors or {}).items()))
         self.rows: dict[str, EvidenceObservation] = {}
         self.invalidations: list[dict] = []
         self._version: str | None = None
@@ -123,10 +201,19 @@ class ConditionalCapabilityMap:
         self._fingerprints: dict[str, tuple[EvidenceObservation, str]] = {}
 
     @property
+    def quality_method(self) -> QualityMethod:
+        return self._quality_method
+
+    @property
+    def quality_predictors(self) -> tuple[tuple[str, QualityPredictor], ...]:
+        return self._quality_predictors
+
+    @property
     def version(self) -> str:
         if self._version is None:
-            self._version = "map:" + digest({"format":"content-addressed-knn-v2", "k":self.k,
+            self._version = "map:" + digest({"format":"content-addressed-capability-v3", "k":self.k,
                 "min_samples":self.min_samples,"max_age_seconds":self.max_age_seconds,
+                "quality_method":self.quality_method,"quality_predictors":self.quality_predictors,
                 "rows":{key:self._row_hash(self.rows[key]) for key in sorted(self.rows)},
                 "invalidations":self.invalidations})
         return self._version
@@ -172,6 +259,21 @@ class ConditionalCapabilityMap:
                 self.rows[key] = row.model_copy(update={"disputed": True, "trusted": False})
         self._version = self._index = None
 
+    def reconcile_outcome_time(self, sample_id: str, observed_at: datetime | None) -> bool:
+        row = self.rows.get(sample_id)
+        if row is None or row.outcome_id is None or sample_id != f"outcome:{row.outcome_id}":
+            return False
+        if observed_at is not None and observed_at.tzinfo is None:
+            raise ValueError("observation timestamp must have a timezone")
+        updates = {"observed_at":observed_at} if observed_at is not None else {"disputed":True,"trusted":False}
+        corrected = row.model_copy(update=updates)
+        if corrected == row:
+            return False
+        self.rows[sample_id] = corrected
+        self._fingerprints.pop(sample_id, None)
+        self._version = self._index = None
+        return True
+
     def invalidate(self, endpoint_id: str, metrics: tuple[str, ...], *,
                    at: datetime, slice_id: str | None = None, reason: str = "drift") -> None:
         self.invalidations.append({"endpoint_id": endpoint_id, "metrics": list(metrics),
@@ -180,12 +282,15 @@ class ConditionalCapabilityMap:
 
     def export(self) -> dict:
         return {"k": self.k, "min_samples": self.min_samples, "max_age_seconds": self.max_age_seconds,
+                "quality_method":self.quality_method,"quality_predictors":dict(self.quality_predictors),
                 "rows": [self.rows[k].model_dump(mode="json") for k in sorted(self.rows)],
                 "invalidations": self.invalidations}
 
     @classmethod
     def restore(cls, data: dict) -> ConditionalCapabilityMap:
-        result = cls(k=data["k"], min_samples=data["min_samples"], max_age_seconds=data["max_age_seconds"])
+        result = cls(k=data["k"], min_samples=data["min_samples"], max_age_seconds=data["max_age_seconds"],
+                     quality_method=data.get("quality_method", "local-mean-hoeffding"),
+                     quality_predictors=data.get("quality_predictors", {}))
         result.add_many([EvidenceObservation.model_validate(r) for r in data["rows"]])
         result.invalidations = list(data.get("invalidations", []))
         return result
@@ -198,19 +303,21 @@ class ConditionalCapabilityMap:
         for item in self.invalidations:
             if item["endpoint_id"] not in row.endpoint_ids or metric not in item["metrics"]:
                 continue
-            if item["slice_id"] and item["slice_id"] not in row.request.traffic_slices:
+            if item["slice_id"] and item["slice_id"] not in (row.request.traffic_slices or {"default"}):
                 continue
             if row.observed_at <= datetime.fromisoformat(item["at"]):
                 return False
         return True
 
-    def _neighbors(self, request, target_id, revisions, at, max_age):
+    def _neighbors(self, request, target_id, revisions, at, max_age, *, cohort=False):
         if self._index is None:
             self._index = {}
             for row in self.rows.values():
-                key = (row.target_id, stratum(row.request), row.endpoint_revisions)
-                self._index.setdefault(key, []).append(row)
-        candidates = self._index.get((target_id, stratum(request), tuple(revisions)), [])
+                for include_lengths in (True, False):
+                    key = (include_lengths, row.target_id, stratum(row.request, include_lengths=include_lengths), row.endpoint_revisions)
+                    self._index.setdefault(key, []).append(row)
+        key = (not cohort, target_id, stratum(request, include_lengths=not cohort), tuple(revisions))
+        candidates = self._index.get(key, [])
         candidates = [r for r in candidates if
                       0 <= (at - r.observed_at).total_seconds() <= max_age
                       and len(r.request.query_features) == len(request.query_features)]
@@ -250,14 +357,35 @@ class ConditionalCapabilityMap:
             return None
         alpha = quality_risk / max(1, comparisons)
         n = len(calibration)
-        center = mean(r.quality for r in (train or calibration))
+        predictor = dict(self.quality_predictors).get(target_id, "local")
+        prediction_rows = train
+        if predictor == "cohort-mean":
+            seen = set()
+            prediction_rows = []
+            for row in self._neighbors(request, target_id, revisions, at,
+                                       min(self.max_age_seconds, max_age_seconds or self.max_age_seconds), cohort=True):
+                if row.split == "train" and self._valid(row, "quality", at) and row.request.request_id not in seen:
+                    seen.add(row.request.request_id)
+                    prediction_rows.append(row)
+        center = mean(r.quality for r in (prediction_rows or train or calibration))
         if n:
             local_mean = mean(r.quality for r in calibration)
-            radius = math.sqrt(math.log(2 / alpha) / (2*n))
-            lower, upper = max(0., local_mean-radius), min(1., local_mean+radius)
+            lower, upper = quality_interval(local_mean, n, alpha, self.quality_method)
         else:
             lower, upper = 0., 1.
-        quality = Prediction(mean=center, lower=min(lower, center), upper=max(upper, center))
+        if self.quality_method == "local-mean-hoeffding":
+            quality = Prediction(mean=center, lower=min(lower, center), upper=max(upper, center))
+        else:
+            quality = Prediction(mean=min(upper, max(lower, center)), lower=lower, upper=upper)
+        quality_diagnostics = QualityBoundDiagnostics(
+            method=self.quality_method, predictor=predictor, raw_prediction=center if prediction_rows or train else None,
+            prediction_sample_size=len(prediction_rows or train), prediction_projection=quality.mean-center,
+            lower_tail_risk=alpha/2, upper_tail_risk=alpha/2,
+            training_mean=mean(r.quality for r in train) if train else None,
+            calibration_mean=local_mean if n else None,
+            hoeffding_radius=math.sqrt(math.log(2/alpha)/(2*n)) if n and self.quality_method == "local-mean-hoeffding" else None,
+            calibration_lower=lower, training_mean_clamp=lower-quality.lower,
+            comparisons=max(1, comparisons), effective_risk=alpha)
         # Direct cost is repriced from current immutable token prices; no stale-dollar reuse.
         absolute = sum(((request.input_tokens + e.input_token_overhead) * e.input_price_per_million
                         + request.max_output_tokens * e.output_price_per_million) / 1e6 for e in endpoints)
@@ -295,20 +423,23 @@ class ConditionalCapabilityMap:
         if not tail_supported: reasons.append("LATENCY_TAIL_COVERAGE")
         if nf < minimum: reasons.append("FAILURE_COVERAGE")
         if len(endpoints) > 1 and not cost_rows: reasons.append("JOINT_COST_COVERAGE")
-        used = {r.sample_id: r for r in train + calibration + latency_cal + failure_rows + cost_rows}
+        used = {r.sample_id: r for r in train + prediction_rows + calibration + latency_cal + failure_rows + cost_rows}
         measured = min(r.observed_at for r in used.values())
         if any(not r.certification_eligible for r in used.values()): reasons.append("BENCHMARK_ONLY_EVIDENCE")
         trust_expirations = [r.trusted_until for r in used.values() if r.trusted_until is not None]
         lineage = EvidenceLineage(
             target_id=target_id, traffic_stratum=stratum(request), feature_version=request.feature_version,
             sample_size=len(train), calibration_size=n,
-            training_hash=self._lineage_hash(train), calibration_hash=self._lineage_hash(calibration + latency_cal + failure_rows),
-            artifact_hash=digest({"method": "local-knn-hoeffding-binomial-p95-v2", "rows": {key:self._row_hash(row) for key,row in used.items()},
+            training_hash=self._lineage_hash(prediction_rows or train), calibration_hash=self._lineage_hash(calibration + latency_cal + failure_rows),
+            artifact_hash=digest({"method": self.quality_method, "predictor":predictor,
+                                  "prediction_order":[r.sample_id for r in prediction_rows],
+                                  "rows": {key:self._row_hash(row) for key,row in used.items()},
                                   "request_features":request.query_features,"request_stratum":stratum(request),
                                   "training_order":[r.sample_id for r in train],
                                   "calibration_order":[r.sample_id for r in calibration],
                                   "k": self.k, "alpha": alpha, "latency_alpha": latency_risk / max(1, comparisons)}),
             endpoint_revisions=revisions, measured_at=measured,
             age_seconds=(at-measured).total_seconds(), calibrated=not reasons, reasons=tuple(reasons),
+            quality_diagnostics=quality_diagnostics,
             trusted_until=min(trust_expirations) if trust_expirations else None)
         return CapabilityEstimate(target_id, quality, cost, latency, failure, lineage)

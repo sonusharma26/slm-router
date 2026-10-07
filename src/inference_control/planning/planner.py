@@ -24,6 +24,16 @@ class CapabilityEstimate:
     lineage: Any = None
 
 
+@dataclass(frozen=True)
+class PlanningAssessment:
+    candidates: tuple[tuple[ExecutionPlan, CapabilityEstimate | None], ...]
+    feasible: tuple[tuple[ExecutionPlan, CapabilityEstimate], ...]
+    rejected: tuple[RejectedAlternative, ...]
+    complete: bool
+    selection: tuple[ExecutionPlan, CapabilityEstimate] | None
+    fallback: str
+
+
 class Planner:
     def __init__(self, endpoints: list[EndpointSnapshot], estimates: list[CapabilityEstimate] | None = None,
                  map_version: str = "map-v1", *, capability_map=None,
@@ -114,15 +124,24 @@ class Planner:
                 statistical.append("CERTIFICATE_EVIDENCE_MISSING")
         return hard, statistical
 
-    def decide(self, request: RequestContext, policy: PolicySpec, seed: int = 0,
-               *, at: datetime | None = None) -> DecisionRecord:
-        started, at = perf_counter(), at or datetime.now(timezone.utc)
+    def selection_key(self, item, policy):
+        plan, e = item
+        fields = {"cost": (e.cost.mean, e.latency.upper, -e.quality.lower),
+                  "quality": (-e.quality.lower, e.cost.mean, e.latency.upper),
+                  "latency": (e.latency.upper, e.cost.mean, -e.quality.lower)}
+        return (*fields[policy.objective], plan.max_calls, plan.evidence_key)
+
+    def assess(self, request, policy, *, at=None):
+        at = at or datetime.now(timezone.utc)
         plans, rejected, complete = self.generate(request, policy)
-        feasible, shortfall = [], []
-        # Bonferroni over the searched family. Compound plans are not inferred from marginals.
         comparisons = max(1, len(plans))
-        for plan in plans:
-            estimate = self.estimate_plan(request, policy, plan, at, comparisons)
+        candidates = tuple((p, self.estimate_plan(request, policy, p, at, comparisons)) for p in plans)
+        return self.select(candidates, policy, complete=complete, rejected=rejected)
+
+    def select(self, candidates, policy, *, complete, rejected=()):
+        rejected = list(rejected)
+        feasible, shortfall = [], []
+        for plan, estimate in candidates:
             hard, statistical = self.reasons(plan, estimate, policy)
             if hard or statistical:
                 rejected.append(RejectedAlternative(endpoint_id=plan.evidence_key, plan_type=plan.plan_type,
@@ -132,11 +151,7 @@ class Planner:
             if not hard and estimate:
                 shortfall.append((plan, estimate))
         def objective(item):
-            plan, e = item
-            fields = {"cost": (e.cost.mean, e.latency.upper, -e.quality.lower),
-                      "quality": (-e.quality.lower, e.cost.mean, e.latency.upper),
-                      "latency": (e.latency.upper, e.cost.mean, -e.quality.lower)}
-            return (*fields[policy.objective], plan.max_calls, plan.evidence_key)
+            return self.selection_key(item, policy)
         chosen = min(feasible, key=objective) if feasible and complete else None
         fallback = policy.infeasible_behavior.value
         # A safe fallback still has to satisfy every hard/statistical/certificate gate.
@@ -150,6 +165,15 @@ class Planner:
                        (e.failure and e.failure.upper <= policy.maximum_failure_probability)]
             chosen = min(choices, key=lambda x: (max(0, policy.minimum_quality-x[1].quality.lower), objective(x))) if choices else None
             if chosen: fallback = "least_shortfall_uncertified"
+        return PlanningAssessment(tuple(candidates), tuple(feasible), tuple(rejected), complete, chosen, fallback)
+
+    def decide(self, request: RequestContext, policy: PolicySpec, seed: int = 0,
+               *, at: datetime | None = None) -> DecisionRecord:
+        started, at = perf_counter(), at or datetime.now(timezone.utc)
+        assessment = self.assess(request, policy, at=at)
+        chosen, feasible = assessment.selection, assessment.feasible
+        complete, fallback = assessment.complete, assessment.fallback
+        rejected = list(assessment.rejected)
         plan, estimate = chosen if chosen else (abstain("NO_FEASIBLE_PLAN" if complete else "PLAN_SEARCH_LIMIT"), None)
         if not chosen:
             plan = plan.model_copy(update={"plan_id": digest({"request": request, "policy": policy, "reason": plan.steps})[:32]})
@@ -166,7 +190,9 @@ class Planner:
                 cert_id = digest({"request":request,"policy": policy, "map": self.map_version, "plan": plan.evidence_key,
                                   "evidence": lineage.artifact_hash, "snapshots": snapshot_ids, "issued_at": at})
                 certificate = RiskCertificate(
-                    cert_id, policy.version, "local-knn-v1", lineage.endpoint_revisions,
+                    cert_id, policy.version,
+                    f"{lineage.quality_diagnostics.method}/binomial-p95-v3" if lineage.quality_diagnostics else "local-knn-v1",
+                    lineage.endpoint_revisions,
                     lineage.calibration_hash, lineage.artifact_hash, policy.quality_risk,
                     policy.cost_risk, policy.latency_risk, tuple(sorted(request.traffic_slices)),
                     at, expires, lineage.assumptions, policy_hash=digest(policy),

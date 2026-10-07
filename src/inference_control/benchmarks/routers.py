@@ -80,9 +80,11 @@ class Baseline:
 
 class SLMRouter:
     name="slm-router"
-    def __init__(self,endpoints,*,k=128,min_samples=20,at=None):
+    def __init__(self,endpoints,*,k=128,min_samples=20,at=None,
+                 quality_method="local-mean-kl",quality_predictors=None):
         self.at=at or datetime.now(timezone.utc)
-        self.map=ConditionalCapabilityMap(k=k,min_samples=min_samples)
+        self.map=ConditionalCapabilityMap(k=k,min_samples=min_samples,
+                                         quality_method=quality_method,quality_predictors=quality_predictors)
         self.planner=Planner(endpoints,capability_map=self.map)
         self.missing_latency=False
 
