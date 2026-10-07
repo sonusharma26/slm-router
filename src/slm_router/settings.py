@@ -25,6 +25,11 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("GOOGLE_API_KEY", "SLM_GOOGLE_API_KEY"),
     )
+    nvidia_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("NVIDIA_API_KEY", "SLM_NVIDIA_API_KEY"),
+        repr=False,
+    )
     requests_per_second: float = Field(
         default=4.0, validation_alias=AliasChoices("SLM_REQUESTS_PER_SECOND")
     )

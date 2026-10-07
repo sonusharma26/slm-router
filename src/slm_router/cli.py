@@ -59,6 +59,7 @@ if _TYPER_AVAILABLE and typer is not None:
             settings.openrouter_api_key,
             registry,
             google_api_key=settings.google_api_key,
+            nvidia_api_key=settings.nvidia_api_key,
             cache=cache,
             limiter=limiter,
         )

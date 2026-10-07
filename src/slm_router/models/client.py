@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import math
 import time
 from typing import Any
 
 from pydantic import BaseModel
 
 from slm_router.types import (
-    CostBreakdown,
     ModelResponse,
     TokenLogprob,
     Usage,
@@ -37,6 +35,7 @@ except ImportError:
 
 BASE_URL = "https://openrouter.ai/api/v1"
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
 class ChatMessage(BaseModel):
@@ -92,7 +91,7 @@ _RETRY = _build_retry_decorator()
 
 
 class OpenRouterClient:
-    """Async client for OpenRouter and the direct Google Gemini API.
+    """Async client for OpenRouter, Google Gemini, and NVIDIA Build.
 
     The historical class name is retained to avoid breaking callers.
     """
@@ -106,9 +105,11 @@ class OpenRouterClient:
         limiter: Any | None = None,
         client: Any | None = None,
         timeout: float = 60,
+        nvidia_api_key: str = "",
     ) -> None:
         self._api_key = api_key
         self._google_api_key = google_api_key
+        self._nvidia_api_key = nvidia_api_key
         self._registry = registry
         self._cache = cache
         self._limiter = limiter
@@ -117,6 +118,7 @@ class OpenRouterClient:
         if client is not None:
             self._client = client
             self._google_client = client
+            self._nvidia_client = client
         elif _HTTPX_AVAILABLE:
             self._client = httpx.AsyncClient(
                 base_url=BASE_URL,
@@ -134,9 +136,15 @@ class OpenRouterClient:
                     "Content-Type": "application/json",
                 },
             )
+            self._nvidia_client = httpx.AsyncClient(
+                base_url=NVIDIA_BASE_URL,
+                timeout=httpx.Timeout(timeout),
+                headers={"Content-Type": "application/json"},
+            )
         else:
             self._client = None
             self._google_client = None
+            self._nvidia_client = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -163,6 +171,20 @@ class OpenRouterClient:
         if _TENACITY_AVAILABLE and _RETRY is not None:
             return await _RETRY(self._post)(payload)
         return await self._post(payload)
+
+    async def _post_nvidia(self, payload: dict) -> dict:
+        resp = await self._nvidia_client.post(
+            f"{NVIDIA_BASE_URL}/chat/completions",
+            json=payload,
+            headers={"Authorization": f"Bearer {self._nvidia_api_key}"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _post_nvidia_with_retry(self, payload: dict) -> dict:
+        if _TENACITY_AVAILABLE and _RETRY is not None:
+            return await _RETRY(self._post_nvidia)(payload)
+        return await self._post_nvidia(payload)
 
     async def _post_google(self, model_id: str, payload: dict) -> dict:
         """POST to Gemini generateContent, raising on HTTP errors."""
@@ -246,6 +268,10 @@ class OpenRouterClient:
             raise RuntimeError(
                 f"OPENROUTER_API_KEY is required for OpenRouter model {model_id!r}"
             )
+        if spec.provider == "nvidia-build" and not self._nvidia_api_key:
+            raise RuntimeError(
+                f"NVIDIA_API_KEY is required for NVIDIA Build model {model_id!r}"
+            )
 
         # ---- cache lookup ----
         cache_key = self._make_cache_key(
@@ -301,6 +327,8 @@ class OpenRouterClient:
         t0 = time.perf_counter()
         if spec.provider == "google":
             raw = await self._post_google_with_retry(model_id, payload)
+        elif spec.provider == "nvidia-build":
+            raw = await self._post_nvidia_with_retry(payload)
         else:
             raw = await self._post_with_retry(payload)
         latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -410,3 +438,4 @@ class OpenRouterClient:
         if self._own_client and self._client is not None and _HTTPX_AVAILABLE:
             await self._client.aclose()
             await self._google_client.aclose()
+            await self._nvidia_client.aclose()

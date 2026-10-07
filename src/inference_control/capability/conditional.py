@@ -81,6 +81,11 @@ def quantile_tolerance_rank(n: int, quantile: float, alpha: float) -> int | None
     return None
 
 
+@lru_cache(maxsize=8192)
+def _feature_distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
+    return sum((x-y)**2 for x,y in zip(left, right))
+
+
 def stratum(request: RequestContext, *, include_lengths: bool = True) -> str:
     """Exact semantic/governance fields and coarse length buckets; no output leakage."""
     fields = {
@@ -322,7 +327,7 @@ class ConditionalCapabilityMap:
                       0 <= (at - r.observed_at).total_seconds() <= max_age
                       and len(r.request.query_features) == len(request.query_features)]
         def distance(row):
-            return (sum((x-y)**2 for x,y in zip(row.request.query_features, request.query_features)),
+            return (_feature_distance(row.request.query_features, request.query_features),
                     row.request.request_id, row.sample_id)
         return sorted(candidates, key=distance)
 

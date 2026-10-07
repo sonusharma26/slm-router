@@ -48,9 +48,16 @@ class EndpointSnapshot(FrozenContract):
     @classmethod
     def validate_inference_config(cls, value):
         allowed = {"temperature", "top_p", "frequency_penalty", "presence_penalty", "seed",
-                   "stop", "reasoning_effort", "verbosity", "logprobs", "top_logprobs"}
+                   "stop", "reasoning_effort", "verbosity", "logprobs", "top_logprobs",
+                   "chat_template_kwargs"}
         if set(value) - allowed:
             raise ValueError("inference_config contains unsupported fields; credentials/transport/retries/output budgets are not snapshot generation settings")
+        template = value.get("chat_template_kwargs")
+        if "chat_template_kwargs" in value and (
+            not isinstance(template, dict) or set(template) != {"enable_thinking"}
+            or not isinstance(template["enable_thinking"], bool)
+        ):
+            raise ValueError("chat_template_kwargs must contain only boolean enable_thinking")
         from inference_control.util import freeze
         return freeze(value)
 
