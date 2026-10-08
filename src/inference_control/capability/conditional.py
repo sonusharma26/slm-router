@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Literal
 from pydantic import Field, model_validator
 from inference_control.contracts import FrozenContract, RequestContext, Prediction, EndpointSnapshot
-from inference_control.util import JsonNative, digest
+from inference_control.util import JsonNative, digest, digest_native
 
 
 QualityMethod = Literal["local-mean-hoeffding", "local-mean-kl"]
@@ -220,6 +220,7 @@ class ConditionalCapabilityMap:
         # Rows are immutable; their strata are pure functions of the request.
         self._strata: dict[str, tuple[EvidenceObservation, str, str]] = {}
         self._row_dumps: dict[str, tuple[EvidenceObservation, JsonNative]] = {}
+        self._request_strata: dict[str, tuple[RequestContext, dict[bool, str]]] = {}
 
     @property
     def quality_method(self) -> QualityMethod:
@@ -246,6 +247,19 @@ class ConditionalCapabilityMap:
             self._fingerprints[row.sample_id]=cached
         return cached[1]
 
+    def _request_stratum(self, request: RequestContext, include_lengths: bool = True) -> str:
+        """``stratum`` memoized per immutable request object (estimates repeat it per plan)."""
+        cached = self._request_strata.get(request.request_id)
+        if cached is None or cached[0] is not request:
+            if len(self._request_strata) >= 4096:
+                self._request_strata.clear()
+            cached = (request, {})
+            self._request_strata[request.request_id] = cached
+        values = cached[1]
+        if include_lengths not in values:
+            values[include_lengths] = stratum(request, include_lengths=include_lengths)
+        return values[include_lengths]
+
     def _row_json(self, row: EvidenceObservation) -> JsonNative:
         """Cached JSON dump of an immutable row; snapshots reuse it instead of re-dumping."""
         cached = self._row_dumps.get(row.sample_id)
@@ -258,7 +272,7 @@ class ConditionalCapabilityMap:
         return cached[1]
 
     def _lineage_hash(self, rows) -> str:
-        return digest([(r.sample_id,self._row_hash(r)) for r in rows])
+        return digest_native([[r.sample_id,self._row_hash(r)] for r in rows])
 
     def add(self, row: EvidenceObservation) -> None:
         # A prompt cannot migrate between training and calibration, even across endpoints.
@@ -353,7 +367,7 @@ class ConditionalCapabilityMap:
                 for include_lengths, key_stratum in ((True, cached[1]), (False, cached[2])):
                     key = (include_lengths, row.target_id, key_stratum, row.endpoint_revisions)
                     self._index.setdefault(key, []).append(row)
-        key = (not cohort, target_id, stratum(request, include_lengths=not cohort), tuple(revisions))
+        key = (not cohort, target_id, self._request_stratum(request, not cohort), tuple(revisions))
         candidates = self._index.get(key, [])
         candidates = [r for r in candidates if
                       0 <= (at - r.observed_at).total_seconds() <= max_age
@@ -465,13 +479,13 @@ class ConditionalCapabilityMap:
         if any(not r.certification_eligible for r in used.values()): reasons.append("BENCHMARK_ONLY_EVIDENCE")
         trust_expirations = [r.trusted_until for r in used.values() if r.trusted_until is not None]
         lineage = EvidenceLineage(
-            target_id=target_id, traffic_stratum=stratum(request), feature_version=request.feature_version,
+            target_id=target_id, traffic_stratum=self._request_stratum(request), feature_version=request.feature_version,
             sample_size=len(train), calibration_size=n,
             training_hash=self._lineage_hash(prediction_rows or train), calibration_hash=self._lineage_hash(calibration + latency_cal + failure_rows),
             artifact_hash=digest({"method": self.quality_method, "predictor":predictor,
                                   "prediction_order":[r.sample_id for r in prediction_rows],
                                   "rows": {key:self._row_hash(row) for key,row in used.items()},
-                                  "request_features":request.query_features,"request_stratum":stratum(request),
+                                  "request_features":request.query_features,"request_stratum":self._request_stratum(request),
                                   "training_order":[r.sample_id for r in train],
                                   "calibration_order":[r.sample_id for r in calibration],
                                   "k": self.k, "alpha": alpha, "latency_alpha": latency_risk / max(1, comparisons)}),

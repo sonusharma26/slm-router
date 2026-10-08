@@ -55,3 +55,21 @@ def test_filtered_events_and_last_sequence():
     assert ledger.events(after=2, event_types=("execution", "latency_receipt"))[0].sequence == 3
     assert ledger.last_sequence() == 4
     assert ledger.verify()
+
+
+def test_spliced_encoding_matches_plain_json():
+    rows = [JsonNative({"b": [1, 2.5, None], "a": {"z": True, "y": "é"}}), JsonNative({"k": 0.1})]
+    tree = {"version": "v", "data": {"rows": rows, "n": 2, "list": [[1, "x"], {"q": 1}]}}
+    plain = {"version": "v", "data": {"rows": [dict(r) for r in rows], "n": 2, "list": [[1, "x"], {"q": 1}]}}
+    expected = json.dumps(plain, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    assert canonical(tree) == expected
+    assert canonical(tree) == expected  # second call uses cached row encodings
+
+
+def test_event_payload_is_lazy_and_equal_to_stored_json():
+    ledger = SQLiteLedger(":memory:")
+    event = ledger.append("snapshot", {"rows": [{"b": 1, "a": 2}]}, actor="test", idempotency_key="s")
+    assert "_payload" not in event.__dict__
+    assert event.payload == {"rows": [{"a": 2, "b": 1}]}
+    assert event == ledger.get(event.event_id) and hash(event) == hash(ledger.get(event.event_id))
+    assert ledger.verify()

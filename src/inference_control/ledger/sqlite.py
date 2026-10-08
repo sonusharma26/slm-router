@@ -11,7 +11,7 @@ from typing import Any
 from inference_control.util import canonical
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Event:
     sequence: int
     event_id: str
@@ -20,9 +20,29 @@ class Event:
     occurred_at: str
     actor: str
     idempotency_key: str
-    payload: dict[str, Any]
+    payload_json: str
     previous_hash: str
     event_hash: str
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """Decoded on first access: writers and filtered readers skip large snapshot payloads."""
+        try:
+            return self.__dict__["_payload"]
+        except KeyError:
+            value = json.loads(self.payload_json)
+            object.__setattr__(self, "_payload", value)
+            return value
+
+    def _key(self):
+        return (self.sequence, self.event_id, self.event_type, self.schema_version, self.occurred_at,
+                self.actor, self.idempotency_key, self.payload_json, self.previous_hash, self.event_hash)
+
+    def __eq__(self, other):
+        return self._key() == other._key() if isinstance(other, Event) else NotImplemented
+
+    def __hash__(self):
+        return hash(self._key())
 
 
 class SQLiteLedger:
@@ -134,5 +154,5 @@ class SQLiteLedger:
     @staticmethod
     def _event(row):
         values = dict(row)
-        values["payload"] = json.loads(values["payload"])
+        values["payload_json"] = values.pop("payload")
         return Event(**values)

@@ -12,10 +12,51 @@ from typing import Any
 _SCALARS = (str, int, bool, type(None))
 
 
+_ENCODE = dict(sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 class JsonNative(dict):
     """A mapping already in JSON-native form (str keys; str/int/float/bool/None/list/dict
     values, finite floats), e.g. ``model_dump(mode="json")``. ``primitive`` returns it
-    unchanged: ``canonical`` sorts keys itself, so the encoded bytes are identical."""
+    unchanged and ``canonical`` reuses its cached encoding; the bytes are identical to
+    encoding it in place. Treat instances as immutable once encoded."""
+
+    def encoded(self) -> str:
+        try:
+            return self.__dict__["_encoded"]
+        except KeyError:
+            text = json.dumps(self, **_ENCODE)
+            self.__dict__["_encoded"] = text
+            return text
+
+
+def _splice(value: Any) -> str:
+    """Encode a ``primitive`` tree exactly like ``json.dumps(..., **_ENCODE)``, reusing
+    cached ``JsonNative`` encodings. Only used when such a node is present."""
+    kind = type(value)
+    if kind is JsonNative:
+        return value.encoded()
+    if kind is dict:
+        return "{" + ",".join(json.dumps(k) + ":" + _splice(value[k]) for k in sorted(value)) + "}"
+    if kind is list:
+        return "[" + ",".join(_splice(v) for v in value) + "]"
+    return json.dumps(value, **_ENCODE)
+
+
+def _has_native(value: Any, depth: int = 4) -> bool:
+    """Cheap check near the root, where snapshot payloads keep their rows."""
+    kind = type(value)
+    if kind is JsonNative:
+        return True
+    if depth == 0:
+        return False
+    if kind is dict or kind is list:
+        children = value.values() if kind is dict else value
+        return any(_has_native(v, depth-1) for v in children if type(v) in _CONTAINERS)
+    return False
+
+
+_CONTAINERS = (dict, list, JsonNative)
 
 
 def primitive(value: Any) -> Any:
@@ -54,7 +95,16 @@ def primitive(value: Any) -> Any:
 
 
 def canonical(value: Any) -> str:
-    return json.dumps(primitive(value), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    tree = primitive(value)
+    if _has_native(tree):
+        return _splice(tree)
+    return json.dumps(tree, **_ENCODE)
+
+
+def digest_native(value: Any) -> str:
+    """``digest`` for a value already made of str/int/bool/None, finite floats, lists and
+    str-keyed dicts. Skips ``primitive``; the bytes (and hash) equal ``digest(value)``."""
+    return hashlib.sha256(json.dumps(value, **_ENCODE).encode()).hexdigest()
 
 
 def digest(value: Any) -> str:
