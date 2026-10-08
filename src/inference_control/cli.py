@@ -69,6 +69,24 @@ def benchmark_static(dataset:Optional[Path]=None, synthetic:bool=False, requests
     output({"report":str(out/"report.json"),"claim_gate":report["claim_gate"],"results":report["results"]})
 
 
+@benchmark_app.command("compare")
+def benchmark_compare(dataset:Optional[Path]=None, zoo:int=0, seeds:str="42,43,44",
+                      out:Path=Path("results/benchmarks/compare"), quality_risk:float=.05):
+    """Compare routers across resplits: cost-quality frontiers, AIQ and the pooled guarantee check.
+
+    Use --dataset for an imported full-information matrix, or --zoo N for the synthetic
+    model-zoo fixture (code-path evidence only)."""
+    from inference_control.benchmarks.data import BenchmarkDataset
+    from inference_control.benchmarks.compare import run_compare, write_compare_report
+    from inference_control.benchmarks.zoo import make_zoo
+    if (dataset is None)==(not zoo):raise typer.BadParameter("choose exactly one of --dataset and --zoo")
+    data=make_zoo(zoo) if zoo else BenchmarkDataset.load(dataset)
+    seed_list=tuple(int(s) for s in seeds.split(",") if s.strip())
+    report=run_compare(data,seeds=seed_list,quality_risk=quality_risk,progress=lambda m:typer.echo(m,err=True))
+    write_compare_report(report,out)
+    output({"report":str(out/"report.json"),"markdown":str(out/"report.md"),"claim_gate":report["claim_gate"]})
+
+
 @benchmark_app.command("dynamic")
 def benchmark_dynamic(scenario:str="quality_minus20pct",steps:int=80,seed:int=42,probe_fraction:float=.1,
                       initial_requests:int=1200,out:Path=Path("results/benchmarks/dynamic")):

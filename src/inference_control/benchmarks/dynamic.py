@@ -73,7 +73,8 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
     data=make_dataset(initial_requests,seed)
     fit,fit_rows=split_data(data,{"train","calibration"})
     at=datetime(2026,1,1,tzinfo=timezone.utc)
-    policy=default_policy(minimum_quality=.55)
+    # This drift/probing study pins the local estimator and abstention it was designed around.
+    policy=default_policy(minimum_quality=.55,infeasible_behavior="abstain")
     # A meaningful latency cap makes the latency shock routing-relevant.
     policy=policy.model_copy(update={"deadline_ms":220.})
     outputs={};inject_at=steps//2
@@ -84,7 +85,7 @@ def run_dynamic(*,scenario="quality_minus20pct",steps=80,seed=42,strategies=("fr
     for strategy in strategies:
         if strategy not in {"frozen","cheapest","impact","uncertainty","random","exhaustive"}:raise ValueError("unknown refresh strategy")
         world=DynamicWorld(data.endpoints,seed=seed,scenario=scenario,inject_at=inject_at)
-        router=SLMRouter(data.endpoints,k=128,min_samples=8,at=at);router.fit(fit,fit_rows)
+        router=SLMRouter(data.endpoints,k=128,min_samples=8,at=at,quality_method="local-mean-kl");router.fit(fit,fit_rows)
         # All strategies begin with the same full initial evidence; refresh budgets are additional.
         if strategy=="cheapest":
             baseline=Baseline("cheapest");baseline.fit(*split_data(data,{"train"}))

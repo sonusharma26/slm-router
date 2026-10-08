@@ -6,6 +6,8 @@ from __future__ import annotations
 import pytest
 
 np = pytest.importorskip("numpy")
+# Saving confidence artifacts is part of the optional legacy stack (`.[legacy]`).
+pytest.importorskip("joblib")
 typer_testing = pytest.importorskip("typer.testing")
 
 from slm_router.eval.datasets.schema import EvalItem, TaskType

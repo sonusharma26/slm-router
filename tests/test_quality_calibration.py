@@ -67,7 +67,7 @@ def test_low_raw_forecast_does_not_cap_kl_and_heldout_labels_do_not_select_route
     queries, rows = split_data(data, {"train", "calibration"})
     rows = [r.model_copy(update={"quality": .1}) if r.request_id.startswith("train-") else r for r in rows]
     at = datetime.now(UTC)
-    router = SLMRouter(data.endpoints, min_samples=1, at=at)
+    router = SLMRouter(data.endpoints, min_samples=1, at=at, quality_method="local-mean-kl")
     router.fit(queries, rows)
     query, ep = data.queries[-1], data.endpoints[0]
     estimate = router.map.estimate(query.request, ep.endpoint_id, (ep,), at=at)

@@ -109,6 +109,7 @@ class InfeasibleBehavior(StrEnum):
     RELAX = "request_relaxation"
     SAFE_FALLBACK = "safe_fallback"
     UNCERTIFIED = "least_shortfall_uncertified"
+    BEST_PREDICTED = "best_predicted_fallback"
 
 
 class PolicySpec(FrozenContract):
@@ -148,7 +149,9 @@ class PolicySpec(FrozenContract):
         allowed = {"direct", "cascade", "verify_escalate", "parallel", "abstain"}
         if not self.permitted_plan_types or not self.permitted_plan_types <= allowed:
             raise ValueError("unsupported or empty permitted_plan_types")
-        if self.require_certificate and self.infeasible_behavior == InfeasibleBehavior.UNCERTIFIED:
+        if self.require_certificate and self.infeasible_behavior in {
+            InfeasibleBehavior.UNCERTIFIED, InfeasibleBehavior.BEST_PREDICTED
+        }:
             raise ValueError("certified policy cannot allow uncertified fallback")
         if self.max_expected_spend > self.max_absolute_spend:
             raise ValueError("max_expected_spend cannot exceed max_absolute_spend")

@@ -30,7 +30,9 @@ def dataset():
 
 
 def test_sparse_static_report_explains_every_rejected_candidate_and_writes_diagnosis(tmp_path):
-    report = run_static(dataset(), resamples=4, sweep=False)
+    # This diagnosis explains the local-neighborhood estimator under abstention.
+    report = run_static(dataset(), resamples=4, sweep=False, slm_quality_method="local-mean-kl",
+                        policy=default_policy(infeasible_behavior="abstain"))
     diagnostic = report["quality_diagnostics"]
     assert report["results"]["slm-router"]["abstention_rate"] == 1.
     assert diagnostic["rejection_counts"] == {"QUALITY_RISK": 4}
@@ -46,7 +48,7 @@ def test_sparse_static_report_explains_every_rejected_candidate_and_writes_diagn
 
 def test_heldout_scores_change_only_evaluator_errors_and_do_not_mutate_fitted_map():
     data = dataset()
-    router = SLMRouter(data.endpoints, min_samples=8, at=datetime.now(UTC))
+    router = SLMRouter(data.endpoints, min_samples=8, at=datetime.now(UTC), quality_method="local-mean-kl")
     router.fit(*split_data(data, {"train", "calibration"}))
     before = router.map.export(), router.map.version
     original = diagnose_quality(router, data, default_policy())
@@ -64,7 +66,7 @@ def test_heldout_scores_change_only_evaluator_errors_and_do_not_mutate_fitted_ma
 
 def test_diagnosis_uses_eligible_search_family_instead_of_entire_pool():
     data = dataset()
-    router = SLMRouter(data.endpoints, min_samples=8)
+    router = SLMRouter(data.endpoints, min_samples=8, quality_method="local-mean-kl")
     router.fit(*split_data(data, {"train", "calibration"}))
     policy = default_policy().model_copy(update={"allowed_endpoints": frozenset({"a"})})
     diagnostic = diagnose_quality(router, data, policy)
@@ -87,7 +89,7 @@ def test_training_clamp_missing_calibration_and_k_limit_are_separate_from_sampli
     estimate = cmap.estimate(data.queries[0].request, ep.endpoint_id, (ep,), at=at)
     assert estimate.quality.lower == .1
     assert estimate.lineage.quality_diagnostics.training_mean_clamp > .7
-    no_calibration = ConditionalCapabilityMap(min_samples=1)
+    no_calibration = ConditionalCapabilityMap(min_samples=1, quality_method="local-mean-kl")
     no_calibration.add_many([r for r in cmap.rows.values() if r.split == "train"])
     missing = no_calibration.estimate(data.queries[0].request, ep.endpoint_id, (ep,), at=at)
     assert missing.quality.lower == 0

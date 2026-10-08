@@ -47,7 +47,7 @@ def estimate(target="a",q=.99,cost=.0001,lat=20):
 
 def evidence(endpoints=None,n=100,at=None,quality=.99):
     endpoints=endpoints or [ep()];at=at or datetime.now(timezone.utc)-timedelta(seconds=1)
-    cmap=ConditionalCapabilityMap(k=256,min_samples=10)
+    cmap=ConditionalCapabilityMap(k=256,min_samples=10,quality_method="local-mean-kl")
     rows=[]
     for endpoint in endpoints:
         for split in ("train","calibration"):
@@ -83,15 +83,19 @@ def test_contract_nested_snapshot_immutable_and_hash_roundtrip():
 
 @pytest.mark.parametrize("update",[{"cost":{"expected_max":3,"absolute_max":1}},
     {"unknown":True},{"plans":{"allowed":["verify_escalate"],"max_calls":2}},
-    {"on_infeasible":"least_shortfall_uncertified"}])
+    {"on_infeasible":"least_shortfall_uncertified","evidence":{"require_certificate":True}},
+    {"on_infeasible":"best_predicted_fallback","evidence":{"require_certificate":True}}])
 def test_policy_compiler_rejects_unsafe_or_unknown_fields(update):
     base={"minimum_quality":.8,"cost":{"expected_max":.01,"absolute_max":.02},"latency":{"p95_max_ms":500}}
     with pytest.raises(ValueError):compile_policy({**base,**update})
 
 
-def test_compiler_success_defaults_to_required_certificates():
-    p=compile_policy({"minimum_quality":.8,"cost":{"expected_max":.01,"absolute_max":.02},"latency":{"p95_max_ms":500}})
-    assert p.require_certificate and p.infeasible_behavior=="abstain"
+def test_compiler_defaults_to_best_predicted_fallback_and_certified_mode_abstains():
+    doc={"minimum_quality":.8,"cost":{"expected_max":.01,"absolute_max":.02},"latency":{"p95_max_ms":500}}
+    p=compile_policy(doc)
+    assert not p.require_certificate and p.infeasible_behavior=="best_predicted_fallback"
+    certified=compile_policy(dict(doc,evidence={"require_certificate":True}))
+    assert certified.require_certificate and certified.infeasible_behavior=="abstain"
 
 
 def compound(kind):
@@ -385,7 +389,10 @@ def test_benchmark_fit_isolation_and_external_competitors_not_faked():
     report=run_static(data,resamples=20,sweep=False)
     assert not report["claim_gate"]["passed"]
     assert report["status"]["RouteLLM"]["state"]=="not_run"
-    assert "best_single" in report["results"] and report["results"]["slm-router"]["abstention_rate"]>0
+    # Default benchmark policy: uncertified requests fall back to the best forecast endpoint.
+    assert report["policy"]["infeasible_behavior"]=="best_predicted_fallback"
+    assert "best_single" in report["results"] and report["results"]["slm-router"]["abstention_rate"]==0
+    assert report["quality_diagnostics"]["method"]=="pooled-ltt"
 
 
 def test_importer_preserves_missing_latency_and_never_uses_test_output_length(tmp_path):

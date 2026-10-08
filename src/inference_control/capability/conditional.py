@@ -4,7 +4,7 @@ Bounds concern the local traffic population under the recorded assumptions, not 
 individual prompt. No test label, oracle answer or post-response feature enters routing.
 """
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 from statistics import mean
 from functools import lru_cache
@@ -12,10 +12,12 @@ from typing import Literal
 from pydantic import Field, model_validator
 from inference_control.contracts import FrozenContract, RequestContext, Prediction, EndpointSnapshot
 from inference_control.util import JsonNative, digest, digest_native
+from inference_control.routing.pooled import (POOLED_ASSUMPTIONS, POOLED_METHOD, EndpointEvidence,
+                                              PooledConfig, PooledEvidence)
 
 
-QualityMethod = Literal["local-mean-hoeffding", "local-mean-kl"]
-QualityPredictor = Literal["local", "cohort-mean"]
+QualityMethod = Literal["local-mean-hoeffding", "local-mean-kl", "pooled-ltt"]
+QualityPredictor = Literal["local", "cohort-mean", "learned"]
 
 
 def binary_kl(observed: float, candidate: float) -> float:
@@ -201,17 +203,21 @@ class EvidenceLineage(FrozenContract):
 
 class ConditionalCapabilityMap:
     def __init__(self, *, k: int = 512, min_samples: int = 30, max_age_seconds: int = 86400,
-                 quality_method: QualityMethod = "local-mean-kl",
-                 quality_predictors: dict[str, QualityPredictor] | None = None):
+                 quality_method: QualityMethod = POOLED_METHOD,
+                 quality_predictors: dict[str, QualityPredictor] | None = None,
+                 pooled: PooledConfig | dict | None = None):
         if k < 1 or min_samples < 1 or max_age_seconds < 1:
             raise ValueError("positive estimator bounds required")
         self.k, self.min_samples, self.max_age_seconds = k, min_samples, max_age_seconds
-        if quality_method not in {"local-mean-kl", "local-mean-hoeffding"}:
+        if quality_method not in {"local-mean-kl", "local-mean-hoeffding", POOLED_METHOD}:
             raise ValueError("unknown quality bound method")
         if any(mode not in {"local", "cohort-mean"} for mode in (quality_predictors or {}).values()):
             raise ValueError("unknown quality point predictor")
         self._quality_method = quality_method
         self._quality_predictors = tuple(sorted((quality_predictors or {}).items()))
+        self._pooled_config = pooled if isinstance(pooled, PooledConfig) else PooledConfig.from_identity(pooled)
+        self._pooled_cache: dict[tuple, PooledEvidence] = {}
+        self._base_version: str | None = None
         self.rows: dict[str, EvidenceObservation] = {}
         self.invalidations: list[dict] = []
         self._version: str | None = None
@@ -231,14 +237,36 @@ class ConditionalCapabilityMap:
         return self._quality_predictors
 
     @property
+    def pooled_config(self) -> PooledConfig:
+        return self._pooled_config
+
+    def configure_pooled(self, config: PooledConfig) -> None:
+        """Set learned-routing hyperparameters and (optionally) an explicit threshold grid."""
+        if not isinstance(config, PooledConfig):
+            raise TypeError("PooledConfig required")
+        self._pooled_config = config
+        self._version = None
+
+    @property
     def version(self) -> str:
         if self._version is None:
-            self._version = "map:" + digest({"format":"content-addressed-capability-v3", "k":self.k,
+            identity = {"format":"content-addressed-capability-v3", "k":self.k,
                 "min_samples":self.min_samples,"max_age_seconds":self.max_age_seconds,
                 "quality_method":self.quality_method,"quality_predictors":self.quality_predictors,
                 "rows":{key:self._row_hash(self.rows[key]) for key in sorted(self.rows)},
-                "invalidations":self.invalidations})
+                "invalidations":self.invalidations}
+            if self.quality_method == POOLED_METHOD:
+                identity["pooled"] = self._pooled_config.identity()
+            self._version = "map:" + digest(identity)
         return self._version
+
+    @property
+    def evidence_version(self) -> str:
+        """Rows and invalidations only; unchanged by estimator configuration."""
+        if self._base_version is None:
+            self._base_version = digest({"rows":{key:self._row_hash(self.rows[key]) for key in sorted(self.rows)},
+                                         "invalidations":self.invalidations})
+        return self._base_version
 
     def _row_hash(self, row: EvidenceObservation) -> str:
         cached=self._fingerprints.get(row.sample_id)
@@ -283,7 +311,7 @@ class ConditionalCapabilityMap:
         if prior and prior != row:
             raise ValueError("immutable sample_id conflict; use supersede_outcome")
         self.rows[row.sample_id] = row
-        self._version = self._index = None
+        self._version = self._index = self._base_version = None
 
     def add_many(self, rows: list[EvidenceObservation]) -> None:
         splits = {r.request.request_id: r.split for r in self.rows.values()}
@@ -297,13 +325,13 @@ class ConditionalCapabilityMap:
                 raise ValueError("immutable sample_id conflict")
             samples[row.sample_id] = row
         self.rows.update({r.sample_id: r for r in rows})
-        self._version = self._index = None
+        self._version = self._index = self._base_version = None
 
     def supersede_outcome(self, outcome_id: str) -> None:
         for key, row in tuple(self.rows.items()):
             if row.outcome_id == outcome_id:
                 self.rows[key] = row.model_copy(update={"disputed": True, "trusted": False})
-        self._version = self._index = None
+        self._version = self._index = self._base_version = None
 
     def reconcile_outcome_time(self, sample_id: str, observed_at: datetime | None) -> bool:
         row = self.rows.get(sample_id)
@@ -317,26 +345,30 @@ class ConditionalCapabilityMap:
             return False
         self.rows[sample_id] = corrected
         self._fingerprints.pop(sample_id, None)
-        self._version = self._index = None
+        self._version = self._index = self._base_version = None
         return True
 
     def invalidate(self, endpoint_id: str, metrics: tuple[str, ...], *,
                    at: datetime, slice_id: str | None = None, reason: str = "drift") -> None:
         self.invalidations.append({"endpoint_id": endpoint_id, "metrics": list(metrics),
                                    "at": at.isoformat(), "slice_id": slice_id, "reason": reason})
-        self._version = None
+        self._version = self._base_version = None
 
     def export(self) -> dict:
-        return {"k": self.k, "min_samples": self.min_samples, "max_age_seconds": self.max_age_seconds,
+        result = {"k": self.k, "min_samples": self.min_samples, "max_age_seconds": self.max_age_seconds,
                 "quality_method":self.quality_method,"quality_predictors":dict(self.quality_predictors),
                 "rows": [self._row_json(self.rows[k]) for k in sorted(self.rows)],
                 "invalidations": self.invalidations}
+        if self.quality_method == POOLED_METHOD:
+            result["pooled"] = self._pooled_config.identity()
+        return result
 
     @classmethod
     def restore(cls, data: dict) -> ConditionalCapabilityMap:
         result = cls(k=data["k"], min_samples=data["min_samples"], max_age_seconds=data["max_age_seconds"],
                      quality_method=data.get("quality_method", "local-mean-hoeffding"),
-                     quality_predictors=data.get("quality_predictors", {}))
+                     quality_predictors=data.get("quality_predictors", {}),
+                     pooled=data.get("pooled"))
         result.add_many([EvidenceObservation.model_validate(r) for r in data["rows"]])
         result.invalidations = list(data.get("invalidations", []))
         return result
@@ -377,6 +409,224 @@ class ConditionalCapabilityMap:
                     row.request.request_id, row.sample_id)
         return sorted(candidates, key=distance)
 
+    # ----- pooled learned routing ---------------------------------------------------------
+    def pooled_evidence(self, endpoints, feature_version: str, at: datetime, max_age: float) -> PooledEvidence:
+        """Train/calibration matrices and a fitted predictor for direct plans over ``endpoints``.
+
+        Rows must be direct single-endpoint evidence for the endpoint's current capability
+        revision and the request's feature version, valid (age, trust, disputes and
+        invalidations) at ``at``. Cached until evidence or configuration changes or a row
+        enters or leaves its validity window.
+        """
+        revisions = self._revision_signature(endpoints)
+        key = (self.evidence_version, digest(self._pooled_config.predictor.identity()), revisions,
+               feature_version, float(max_age))
+        cached = self._pooled_cache.get(key)
+        if cached is not None and cached.usable(at):
+            return cached
+        previous = next((v for k, v in self._pooled_cache.items() if k[2:] == key[2:]), None)
+        evidence = self._build_pooled_evidence(dict(revisions), feature_version, at, max_age, previous)
+        self._pooled_cache = {k: v for k, v in self._pooled_cache.items() if k[2:] != key[2:]}
+        self._pooled_cache[key] = evidence
+        return evidence
+
+    def _revision_signature(self, endpoints) -> tuple:
+        """(endpoint_id, capability_revision) pairs, memoized per snapshot object (revisions are digests)."""
+        cache = self.__dict__.setdefault("_signature_cache", {})
+        key = tuple(id(e) for e in endpoints)
+        cached = cache.get(key)
+        if cached is None or any(a is not b for a, b in zip(cached[0], endpoints)):
+            if len(cache) >= 256:
+                cache.clear()
+            cached = (tuple(endpoints), tuple(sorted((e.endpoint_id, e.capability_revision) for e in endpoints)))
+            cache[key] = cached
+        return cached[1]
+
+    def _build_pooled_evidence(self, revisions: dict, feature_version: str, at: datetime,
+                               max_age: float, previous: PooledEvidence | None) -> PooledEvidence:
+        import numpy as np
+        from inference_control.routing.predictor import QualityPredictor
+        ids = tuple(sorted(revisions))
+        column = {e: i for i, e in enumerate(ids)}
+        splits = {"train": {}, "calibration": {}}
+        stats = {e: {"train": 0, "lat_cal": [], "lat_all": [], "fail": 0, "fail_n": 0, "out": [], "eligible": True}
+                 for e in ids}
+        changes, used = [], {"train": [], "calibration": []}
+        for row in self.rows.values():
+            if row.plan_type != "direct" or len(row.endpoint_ids) != 1:
+                continue
+            endpoint = row.endpoint_ids[0]
+            if endpoint not in revisions or row.endpoint_revisions != (revisions[endpoint],):
+                continue
+            if row.request.feature_version != feature_version:
+                continue
+            age = (at - row.observed_at).total_seconds()
+            if age < 0:
+                changes.append(row.observed_at)
+                continue
+            if age > max_age:
+                continue
+            changes.append(row.observed_at + timedelta(seconds=max_age, microseconds=1))
+            if row.trusted_until is not None and row.trusted_until > at:
+                changes.append(row.trusted_until)
+            info, bucket = stats[endpoint], splits[row.split]
+            entry = bucket.setdefault(row.request.request_id, [row.request, {}, {}])
+            touched = False
+            for metric, slot in (("quality", 1), ("cost", 2)):
+                if self._valid(row, metric, at):
+                    prior = entry[slot].get(endpoint)
+                    order = (row.observed_at, row.sample_id)
+                    if prior is None or order > prior[0]:
+                        entry[slot][endpoint] = (order, row)
+                    touched = True
+            if touched:
+                used[row.split].append(row)
+            if self._valid(row, "latency", at):
+                info["lat_all"].append(row.latency_ms)
+                if row.split == "calibration":
+                    info["lat_cal"].append(row.latency_ms)
+            if row.split == "calibration" and self._valid(row, "failure", at):
+                info["fail_n"] += 1
+                info["fail"] += int(row.failed)
+            if self._valid(row, "cost", at):
+                info["out"].append(row.output_tokens)
+        def matrices(split):
+            entries = [splits[split][rid] for rid in sorted(splits[split])]
+            entries = [e for e in entries if e[1]]  # at least one valid quality outcome
+            if not entries:
+                return [], np.zeros((0, len(ids))), np.zeros((0, len(ids)))
+            dims = {len(e[0].query_features) for e in entries}
+            width = max(dims, key=lambda d: (sum(len(e[0].query_features) == d for e in entries), d))
+            entries = [e for e in entries if len(e[0].query_features) == width]
+            quality = np.full((len(entries), len(ids)), np.nan)
+            cost = np.full((len(entries), len(ids)), np.nan)
+            for i, (request, q_rows, c_rows) in enumerate(entries):
+                for endpoint, (_, row) in q_rows.items():
+                    quality[i, column[endpoint]] = row.quality
+                for endpoint, (_, row) in c_rows.items():
+                    cost[i, column[endpoint]] = row.cost
+            return [e[0] for e in entries], quality, cost
+        train_requests, train_quality, train_cost = matrices("train")
+        calibration_requests, calibration_quality, _ = matrices("calibration")
+        for endpoint in ids:
+            stats[endpoint]["train"] = int((~np.isnan(train_quality[:, column[endpoint]])).sum()) if len(train_requests) else 0
+        for row in used["train"] + used["calibration"]:
+            if not row.certification_eligible and self._valid(row, "quality", at):
+                stats[row.endpoint_ids[0]]["eligible"] = False
+        endpoint_evidence = {e: EndpointEvidence(
+            training_outcomes=v["train"], latency_calibration=tuple(sorted(v["lat_cal"])),
+            latency_mean=mean(v["lat_all"]) if v["lat_all"] else None,
+            latency_max=max(v["lat_all"]) if v["lat_all"] else None,
+            failures=v["fail"], failure_observations=v["fail_n"],
+            output_tokens=mean(v["out"]) if v["out"] else None,
+            certification_eligible=v["eligible"]) for e, v in stats.items()}
+        predictor = None
+        config = self._pooled_config.predictor
+        if len(train_requests) and not np.isnan(train_quality).all():
+            features = [r.query_features for r in train_requests]
+            slices = [r.task_hint for r in train_requests]
+            reuse = None
+            if previous is not None and previous.predictor is not None:
+                old = previous.predictor
+                if ((old.config.clusters, old.config.iterations, old.config.seed) ==
+                        (config.clusters, config.iterations, config.seed)
+                        and old._centroids.shape[1] == len(features[0])
+                        and old.training_size >= .8 * len(train_requests)):
+                    reuse = old._centroids  # still a function of training evidence only
+            predictor = QualityPredictor(config).fit(features, train_quality, train_cost, slices, centroids=reuse)
+        rows_used = used["train"] + used["calibration"]
+        measured = min((r.observed_at for r in rows_used), default=None)
+        trust = [r.trusted_until for r in rows_used if r.trusted_until is not None]
+        training_hash = self._lineage_hash(sorted(used["train"], key=lambda r: r.sample_id))
+        calibration_hash = self._lineage_hash(sorted(used["calibration"], key=lambda r: r.sample_id))
+        future = [t for t in changes if t > at]
+        identity = digest_native({"training": training_hash, "calibration": calibration_hash,
+            "predictor": predictor.artifact_digest() if predictor is not None else None,
+            "endpoints": [[e, revisions[e]] for e in ids], "feature_version": feature_version,
+            "max_age": float(max_age)})
+        return PooledEvidence(endpoint_ids=ids, feature_version=feature_version, fitted_at=at,
+            next_change=min(future) if future else None, train_requests=train_requests,
+            train_quality=train_quality, train_cost=train_cost, calibration_requests=calibration_requests,
+            calibration_quality=calibration_quality, endpoints=endpoint_evidence, measured_at=measured,
+            trusted_until=min(trust) if trust else None, training_hash=training_hash,
+            calibration_hash=calibration_hash, predictor=predictor, identity=identity)
+
+    @staticmethod
+    def pooled_numbers(evidence: PooledEvidence, request: RequestContext, endpoint: EndpointSnapshot,
+                       cost_forecast: float, *, quality_risk: float, latency_risk: float,
+                       comparisons: int, minimum: int) -> dict:
+        """Cost, latency and failure predictions shared by serving and calibration."""
+        info = evidence.endpoints[endpoint.endpoint_id]
+        absolute = ((request.input_tokens + endpoint.input_token_overhead) * endpoint.input_price_per_million
+                    + request.max_output_tokens * endpoint.output_price_per_million) / 1e6
+        if cost_forecast == cost_forecast:  # finite learned forecast
+            expected = float(cost_forecast)
+        else:
+            output = request.expected_output_tokens
+            if output is None:
+                output = info.output_tokens if info.output_tokens is not None else request.max_output_tokens
+            expected = ((request.input_tokens + endpoint.input_token_overhead) * endpoint.input_price_per_million
+                        + min(request.max_output_tokens, output) * endpoint.output_price_per_million) / 1e6
+        comparisons = max(1, comparisons)
+        values = info.latency_calibration
+        rank = quantile_tolerance_rank(len(values), .95, latency_risk / comparisons) if values else None
+        lat_mean = info.latency_mean if info.latency_mean is not None else 0.
+        lat_upper = values[rank-1] if rank is not None else (info.latency_max if info.latency_max is not None else 5e299) * 2
+        nf = info.failure_observations
+        pf = info.failures / nf if nf else .5
+        radius = math.sqrt(math.log(2/(quality_risk / comparisons))/(2*nf)) if nf else 1.
+        reasons = []
+        if info.latency_mean is None: reasons.append("LATENCY_MISSING")
+        if rank is None: reasons.append("LATENCY_TAIL_COVERAGE")
+        if info.training_outcomes < minimum: reasons.append("TRAINING_COVERAGE")
+        if nf < minimum: reasons.append("FAILURE_COVERAGE")
+        if not info.certification_eligible: reasons.append("BENCHMARK_ONLY_EVIDENCE")
+        return {"cost": (expected, min(expected, 0.), max(absolute, expected)),
+                "latency": (lat_mean, 0., max(lat_mean, lat_upper)),
+                "failure": (pf, max(0., pf - radius), min(1., pf + radius)),
+                "reasons": tuple(reasons)}
+
+    def pooled_estimate(self, evidence: PooledEvidence, request: RequestContext, endpoint: EndpointSnapshot,
+                        quality_forecast: float, numbers: dict, *, at: datetime, quality_risk: float,
+                        target: float | None = None, calibration=None, artifact_base: str | None = None):
+        """Assemble a CapabilityEstimate; ``quality.lower`` carries the certified population bound."""
+        from inference_control.planning.planner import CapabilityEstimate
+        if quality_forecast != quality_forecast:  # NaN: no learned forecast
+            return None
+        q = float(min(1., max(0., quality_forecast)))
+        certified = (calibration is not None and calibration.threshold is not None and target is not None
+                     and q >= calibration.threshold)
+        if certified:
+            quality = Prediction(mean=min(1., max(target, q)), lower=target, upper=1.)
+        else:
+            quality = Prediction(mean=q, lower=0., upper=1.)
+        reasons = list(numbers["reasons"])
+        if not certified:
+            reasons.insert(0, "POOLED_NOT_CERTIFIED" if calibration is not None and calibration.threshold is not None
+                           else "POOLED_UNCALIBRATED")
+        info = evidence.endpoints[endpoint.endpoint_id]
+        diagnostics = QualityBoundDiagnostics(method=POOLED_METHOD, predictor="learned", raw_prediction=q,
+            prediction_sample_size=info.training_outcomes, prediction_projection=quality.mean - q,
+            lower_tail_risk=quality_risk, upper_tail_risk=0., training_mean=evidence.training_mean(endpoint.endpoint_id),
+            calibration_mean=calibration.certified_mean if calibration is not None else None,
+            hoeffding_radius=None, calibration_lower=quality.lower, training_mean_clamp=0.,
+            comparisons=1, effective_risk=quality_risk)
+        base = artifact_base or digest_native([evidence.identity, None])
+        measured = evidence.measured_at or at
+        lineage = EvidenceLineage(target_id=endpoint.endpoint_id, traffic_stratum=self._request_stratum(request),
+            feature_version=request.feature_version, sample_size=info.training_outcomes,
+            calibration_size=calibration.calibration_requests if calibration is not None else 0,
+            training_hash=evidence.training_hash, calibration_hash=evidence.calibration_hash,
+            artifact_hash=digest_native([base, endpoint.endpoint_id]), endpoint_revisions=(endpoint.capability_revision,),
+            measured_at=measured, age_seconds=(at - measured).total_seconds(), calibrated=not reasons,
+            reasons=tuple(reasons), quality_diagnostics=diagnostics, trusted_until=evidence.trusted_until,
+            assumptions=POOLED_ASSUMPTIONS)
+        return CapabilityEstimate(endpoint.endpoint_id, quality,
+                                  Prediction(mean=numbers["cost"][0], lower=numbers["cost"][1], upper=numbers["cost"][2]),
+                                  Prediction(mean=numbers["latency"][0], lower=numbers["latency"][1], upper=numbers["latency"][2]),
+                                  Prediction(mean=numbers["failure"][0], lower=numbers["failure"][1], upper=numbers["failure"][2]),
+                                  lineage)
+
     def estimate(self, request: RequestContext, target_id: str,
                  endpoints: tuple[EndpointSnapshot, ...], *, at: datetime | None = None,
                  quality_risk: float = 0.05, latency_risk: float = 0.05,
@@ -384,6 +634,18 @@ class ConditionalCapabilityMap:
                  comparisons: int = 1):
         from inference_control.planning.planner import CapabilityEstimate
         at = at or datetime.now(timezone.utc)
+        if self.quality_method == POOLED_METHOD:
+            # Uncertified forecast: certification is a property of the planner's routing rule.
+            if len(endpoints) != 1 or endpoints[0].endpoint_id != target_id:
+                return None
+            evidence = self.pooled_evidence(endpoints, request.feature_version, at,
+                                            min(self.max_age_seconds, max_age_seconds or self.max_age_seconds))
+            quality, cost = evidence.forecast([request])
+            numbers = self.pooled_numbers(evidence, request, endpoints[0], float(cost[0, 0]),
+                quality_risk=quality_risk, latency_risk=latency_risk, comparisons=comparisons,
+                minimum=max(self.min_samples, min_samples or self.min_samples))
+            return self.pooled_estimate(evidence, request, endpoints[0], float(quality[0, 0]), numbers,
+                                        at=at, quality_risk=quality_risk)
         revisions = tuple(e.capability_revision for e in endpoints)
         rows = self._neighbors(request, target_id, revisions, at,
                                min(self.max_age_seconds, max_age_seconds or self.max_age_seconds))

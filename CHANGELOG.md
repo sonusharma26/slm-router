@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — pooled learned routing
+
+- **Learned forecasts.** A numpy predictor combines kNN over request features with a spherical k-means cluster table, shrinking toward slice and global means; hyperparameters are chosen on validation only. New hashed word n-gram features (`hash-ngram-v2-256`) and optional sentence-transformer embeddings.
+- **Pooled calibration (new default quality method `pooled-ltt`).** The planner calibrates its own routing rule over every full-information calibration request with a fixed-sequence learn-then-test of Hoeffding–Bentkus p-values. With probability at least `1 - quality_risk`, mean quality over all certified traffic is at least `minimum_quality`. Per-neighborhood `local-mean-kl` and `local-mean-hoeffding` remain selectable and restore unchanged.
+- **Strong-model fallback.** New `best_predicted_fallback` infeasible behavior serves uncertified requests with the highest-forecast endpoint (validation-tuned margin toward the best training endpoint). Spend, deadline, privacy and call caps never relax. It is the policy-compiler default unless `evidence.require_certificate: true`, which now defaults to `false`.
+- **Comparison harness.** `slm benchmark compare` reports cost-quality frontiers, AIQ, quality at the best single model's cost, cost to match it, and an empirical check of the pooled guarantee across resplits. `scripts/run_llmrouterbench.py` evaluates on LLMRouterBench with its own loader, split and test prompts.
+- **Performance.** kNN baseline neighbors are computed once per request (≈13× faster); pooled decisions cache evidence, forecasts and signatures.
+
+### Compatibility
+
+- `ConditionalCapabilityMap()` and `SLMRouter()` now default to `pooled-ltt`. Saved maps keep their recorded method. The dynamic drift/probing study, the drift-recovery demo and earlier quality studies pin `local-mean-kl` with abstention, so their documented results reproduce exactly.
+- Policy documents that omit `evidence.require_certificate` now compile to uncertified-fallback policies. Set `require_certificate: true` (or `on_infeasible: abstain`) to keep certified-only serving. Compiled versions of such documents change.
+- Pooled certification needs calibration requests scored on every eligible endpoint (benchmark imports or exhaustive probes). With only sparse served-traffic evidence the router stays uncertified and falls back. Pooled mode routes direct plans only.
+- `numpy>=2.0,<3` is a new core dependency. Two legacy tests now skip without `joblib` instead of failing when numpy is present.
+
 ## 2.0.0a2 — adaptive evidence preview
 
 Implemented bounded direct/compound plan search; conditional kNN evidence with separate calibration; exact-request certificates and confidence bounds on local p95; targeted invalidation; durable SQLite read models, detector state and execution admission; trusted delayed outcomes; shadow/canary lifecycle; actual provider/runtime bridging; strict policies; a thin non-streaming Chat Completions API; and split-safe static/dynamic/sparse benchmark tooling.
