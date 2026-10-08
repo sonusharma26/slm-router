@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Literal
 from pydantic import Field, model_validator
 from inference_control.contracts import FrozenContract, RequestContext, Prediction, EndpointSnapshot
-from inference_control.util import digest
+from inference_control.util import JsonNative, digest
 
 
 QualityMethod = Literal["local-mean-hoeffding", "local-mean-kl"]
@@ -84,6 +84,19 @@ def quantile_tolerance_rank(n: int, quantile: float, alpha: float) -> int | None
 @lru_cache(maxsize=8192)
 def _feature_distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return sum((x-y)**2 for x,y in zip(left, right))
+
+
+def _json_native(value) -> bool:
+    kind = type(value)
+    if kind is float:
+        return math.isfinite(value)
+    if kind in (str, int, bool, type(None)):
+        return True
+    if kind is dict:
+        return all(type(k) is str and _json_native(v) for k, v in value.items())
+    if kind is list:
+        return all(_json_native(v) for v in value)
+    return False
 
 
 def stratum(request: RequestContext, *, include_lengths: bool = True) -> str:
@@ -204,6 +217,9 @@ class ConditionalCapabilityMap:
         self._version: str | None = None
         self._index: dict[tuple, list[EvidenceObservation]] | None = None
         self._fingerprints: dict[str, tuple[EvidenceObservation, str]] = {}
+        # Rows are immutable; their strata are pure functions of the request.
+        self._strata: dict[str, tuple[EvidenceObservation, str, str]] = {}
+        self._row_dumps: dict[str, tuple[EvidenceObservation, JsonNative]] = {}
 
     @property
     def quality_method(self) -> QualityMethod:
@@ -228,6 +244,17 @@ class ConditionalCapabilityMap:
         if cached is None or cached[0] is not row:
             cached=(row,digest(row))
             self._fingerprints[row.sample_id]=cached
+        return cached[1]
+
+    def _row_json(self, row: EvidenceObservation) -> JsonNative:
+        """Cached JSON dump of an immutable row; snapshots reuse it instead of re-dumping."""
+        cached = self._row_dumps.get(row.sample_id)
+        if cached is None or cached[0] is not row:
+            dumped = row.model_dump(mode="json")
+            if not _json_native(dumped):
+                raise ValueError("non-finite evidence cannot be serialized")
+            cached = (row, JsonNative(dumped))
+            self._row_dumps[row.sample_id] = cached
         return cached[1]
 
     def _lineage_hash(self, rows) -> str:
@@ -288,7 +315,7 @@ class ConditionalCapabilityMap:
     def export(self) -> dict:
         return {"k": self.k, "min_samples": self.min_samples, "max_age_seconds": self.max_age_seconds,
                 "quality_method":self.quality_method,"quality_predictors":dict(self.quality_predictors),
-                "rows": [self.rows[k].model_dump(mode="json") for k in sorted(self.rows)],
+                "rows": [self._row_json(self.rows[k]) for k in sorted(self.rows)],
                 "invalidations": self.invalidations}
 
     @classmethod
@@ -318,8 +345,13 @@ class ConditionalCapabilityMap:
         if self._index is None:
             self._index = {}
             for row in self.rows.values():
-                for include_lengths in (True, False):
-                    key = (include_lengths, row.target_id, stratum(row.request, include_lengths=include_lengths), row.endpoint_revisions)
+                cached = self._strata.get(row.sample_id)
+                if cached is None or cached[0] is not row:
+                    cached = (row, stratum(row.request, include_lengths=True),
+                              stratum(row.request, include_lengths=False))
+                    self._strata[row.sample_id] = cached
+                for include_lengths, key_stratum in ((True, cached[1]), (False, cached[2])):
+                    key = (include_lengths, row.target_id, key_stratum, row.endpoint_revisions)
                     self._index.setdefault(key, []).append(row)
         key = (not cohort, target_id, stratum(request, include_lengths=not cohort), tuple(revisions))
         candidates = self._index.get(key, [])

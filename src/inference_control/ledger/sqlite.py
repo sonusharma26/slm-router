@@ -97,13 +97,24 @@ class SQLiteLedger:
         if row is None: raise KeyError(event_id)
         return self._event(row)
 
-    def events(self, event_type: str | None = None, *, after: int = 0) -> list[Event]:
+    def events(self, event_type: str | None = None, *, after: int = 0,
+               event_types: tuple[str, ...] | None = None) -> list[Event]:
+        """Events after a sequence; ``event_types`` filters in SQL so unrelated payloads are never decoded."""
         with self.lock:
             if event_type:
                 rows = self.connection.execute("SELECT * FROM events WHERE event_type=? AND sequence>? ORDER BY sequence", (event_type,after)).fetchall()
+            elif event_types:
+                marks = ",".join("?" * len(event_types))
+                rows = self.connection.execute(f"SELECT * FROM events WHERE event_type IN ({marks}) AND sequence>? ORDER BY sequence",
+                                               (*event_types, after)).fetchall()
             else:
                 rows = self.connection.execute("SELECT * FROM events WHERE sequence>? ORDER BY sequence", (after,)).fetchall()
         return [self._event(r) for r in rows]
+
+    def last_sequence(self) -> int:
+        with self.lock:
+            row = self.connection.execute("SELECT MAX(sequence) FROM events").fetchone()
+        return row[0] or 0
 
     def verify(self) -> bool:
         previous = "0"*64
