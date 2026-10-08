@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — answer-checking cascades and the price-penalty rule
+
+- Pooled routing defaults to `rule="utility"`: route to argmax(forecast − λ·cost), with λ calibrated so mean quality over all routed traffic meets the target. `rule="threshold"` stays selectable; saved maps keep their rule.
+- New `inference_control.routing.cascade`: answer-agreement cascades (cheap answer accepted when a checker agrees, otherwise escalate), calibrated with a fixed-sequence test that selects the cheapest passing configuration. Evaluated offline in `slm benchmark compare --zoo` and `scripts/run_llmrouterbench.py` (stored predictions).
+- Fix: forecasts are now identical for a request alone or in a batch (similarity ties broke differently under batched BLAS).
+- Synthetic zoo: cascade AIQ 0.905 vs kNN 0.878 and best possible question-only 0.904. See `docs/release/CASCADE_ROUTING_2026-10-09.md`.
+
 ## Unreleased — pooled learned routing
 
 - **Learned forecasts.** A numpy predictor combines kNN over request features with a spherical k-means cluster table, shrinking toward slice and global means; hyperparameters are chosen on validation only. New hashed word n-gram features (`hash-ngram-v2-256`) and optional sentence-transformer embeddings.

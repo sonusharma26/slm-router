@@ -145,8 +145,9 @@ class SLMRouter:
         config,trials=tune([r.query_features for r in evidence.train_requests],evidence.train_quality,
             evidence.train_cost,[r.task_hint for r in evidence.train_requests],
             [q.request.query_features for q in queries],quality,[q.request.task_hint for q in queries],seed=0)
-        self.map.configure_pooled(PooledConfig(predictor=config))
-        grid=self.planner.pooled_threshold_grid([q.request for q in queries],policy,at=self.at)
+        rule=self.map.pooled_config.rule
+        self.map.configure_pooled(PooledConfig(predictor=config,rule=rule))
+        grid=self.planner.pooled_threshold_grid([q.request for q in queries],policy,at=self.at) if rule=="threshold" else ()
         # Fallback margin: how much better another forecast must be before the fallback leaves
         # the endpoint with the best training mean. Chosen by validation quality of the choice.
         evidence=self.planner._pooled_evidence(policy,self.at,feature_version)
@@ -163,7 +164,7 @@ class SLMRouter:
             picked=quality[rows,choice]
             margins[margin]=float(np.nanmean(picked)) if np.isfinite(picked).any() else float("nan")
         best_margin=max(margins,key=lambda m:(round(margins[m],12),m))  # ties: stay with the best single endpoint
-        self.map.configure_pooled(PooledConfig(predictor=config,thresholds=grid or None,fallback_margin=best_margin))
+        self.map.configure_pooled(PooledConfig(predictor=config,thresholds=grid or None,fallback_margin=best_margin,rule=rule))
         self.tuning={"predictor":config.identity(),"thresholds":list(grid),"fallback_margin":best_margin,
                      "fallback_validation_quality":margins,
                      "validation_brier":min(t["brier"] for t in trials),"trials":len(trials)}

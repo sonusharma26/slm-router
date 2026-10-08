@@ -18,7 +18,7 @@ POOLED_ASSUMPTIONS = (
     "Calibration requests are exchangeable with future traffic (same request mix and endpoint behavior).",
     "Each calibration request was scored on every endpoint the policy allowed; which requests were scored is unrelated to their quality.",
     "Forecasts and the threshold grid were fixed from training and validation evidence only; calibration outcomes are used only by the threshold test.",
-    "Guarantee: with probability at least 1 - quality_risk, the mean quality over all requests certified at the selected threshold is at least minimum_quality (Hoeffding-Bentkus fixed-sequence test). It is a population guarantee, not a per-answer guarantee.",
+    "Guarantee: with probability at least 1 - quality_risk, the mean quality over all requests certified by the selected rule (every routed request under the utility rule; requests clearing the threshold under the threshold rule) is at least minimum_quality (Hoeffding-Bentkus fixed-sequence test). It is a population guarantee, not a per-answer guarantee.",
     "Requests that are not certified are served by the uncertified fallback (when the policy allows it) and are excluded from the guarantee.",
     "Latency samples are IID per endpoint; p95 uses a binomial tolerance bound.",
 )
@@ -32,8 +32,14 @@ class PooledConfig:
     # Uncertified fallback leaves the endpoint with the best training mean only when another
     # forecast beats it by more than this margin (tuned on validation; 0 = plain argmax).
     fallback_margin: float = 0.
+    # "utility": route each request to argmax(forecast - lambda * cost) with lambda calibrated so
+    # that mean quality over ALL routed traffic meets the target. "threshold": certify the first
+    # endpoint (in selection order) whose forecast clears a calibrated threshold.
+    rule: str = "utility"
 
     def __post_init__(self):
+        if self.rule not in {"utility", "threshold"}:
+            raise ValueError("rule must be 'utility' or 'threshold'")
         if not 0 <= self.fallback_margin <= 1:
             raise ValueError("fallback_margin must lie in [0, 1]")
         if self.thresholds is not None:
@@ -52,16 +58,19 @@ class PooledConfig:
                  "fractions": list(self.fractions)}
         if self.fallback_margin:
             value["fallback_margin"] = self.fallback_margin
+        value["rule"] = self.rule
         return value
 
     @classmethod
     def from_identity(cls, value: dict | None) -> PooledConfig:
-        value = value or {}
+        if not value:
+            return cls()
         thresholds = value.get("thresholds")
         return cls(predictor=PredictorConfig.from_identity(value.get("predictor")),
                    thresholds=tuple(thresholds) if thresholds is not None else None,
                    fractions=tuple(value.get("fractions", DEFAULT_FRACTIONS)),
-                   fallback_margin=float(value.get("fallback_margin", 0.)))
+                   fallback_margin=float(value.get("fallback_margin", 0.)),
+                   rule=value.get("rule", "threshold"))  # maps saved before the utility rule
 
 
 @dataclass(frozen=True)

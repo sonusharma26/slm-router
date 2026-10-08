@@ -222,6 +222,8 @@ New capability maps use **pooled learned routing** (`pooled-ltt`):
 2. **Certify.** The planner calibrates its own routing rule on calibration requests that were scored on every eligible endpoint. It certifies the cheapest endpoint whose forecast clears a threshold chosen by a fixed-sequence learn-then-test, so that, with probability at least `1 - quality_risk`, mean quality over all certified traffic is at least `minimum_quality`.
 3. **Fall back.** Requests it cannot certify go to the endpoint with the best forecast (`on_infeasible: best_predicted_fallback`, the default unless `evidence.require_certificate: true`). Hard limits on spend, deadline, privacy and calls still apply.
 
+By default the router routes each request to the endpoint with the best forecast quality minus a calibrated price penalty, which covers all routed traffic with the guarantee. An offline **answer-checking cascade** (`inference_control.routing.cascade`) goes further: it accepts a cheap answer when a second model agrees and escalates when they disagree. On the synthetic zoo it reaches AIQ 0.905, against 0.878 for kNN. See [cascade routing](docs/release/CASCADE_ROUTING_2026-10-09.md).
+
 The per-neighborhood estimators (`local-mean-kl`, `local-mean-hoeffding`) remain available. See [pooled routing](docs/release/POOLED_ROUTING_2026-10-08.md) for the method, assumptions and measured results.
 
 ```bash

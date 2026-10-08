@@ -137,12 +137,14 @@ def diagnose_pooled(router, policy, dataset):
     feature_version = fit[0].request.feature_version if fit else "query-v1"
     evidence, calibration = router.planner.pooled_calibration(policy, at=router.at, feature_version=feature_version)
     return {"method": "pooled-ltt", "quality_target": policy.minimum_quality, "quality_risk": policy.quality_risk,
-            "threshold": calibration.threshold, "test": calibration.method,
+            "rule": router.map.pooled_config.rule, "threshold": calibration.threshold,
+            "price_penalty": getattr(calibration, "parameter", None), "test": calibration.method,
             "calibration_requests": calibration.calibration_requests,
             "certified_calibration_requests": calibration.certified_count,
             "certified_calibration_mean": calibration.certified_mean,
             "steps": [asdict(step) for step in calibration.steps],
             "training_requests": len(evidence.train_requests),
             "predictor": router.map.pooled_config.identity(), "tuning": router.tuning,
-            "notes": ["The guarantee covers the mean quality of all certified requests at the selected threshold.",
+            "notes": ["The guarantee covers the mean quality of all requests certified by the selected rule "
+                      "(every routed request under the utility rule).",
                       "Uncertified requests use the policy's fallback and are outside the guarantee."]}

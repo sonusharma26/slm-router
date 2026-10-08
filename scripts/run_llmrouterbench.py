@@ -23,9 +23,10 @@ Per seed, the script
    counts are reported;
 3. divides LLMRouterBench's training prompts into train / calibration / validation by a
    prompt hash, leaving its test prompts untouched;
-4. runs the comparison harness (slm-router at several quality targets, kNN, threshold,
-   best single model, every single model, and the oracle as a reference) and writes
-   ``report.json`` and ``report.md``.
+4. runs the comparison harness (slm-router at several quality targets, the
+   answer-agreement cascade built from each model's stored extracted answer, kNN,
+   threshold, best single model, every single model, and the oracle as a reference) and
+   writes ``report.json`` and ``report.md``.
 
 By default the router never sees which dataset a prompt came from (``--task-hints``
 exposes it; that is a different, easier setting). Features are hashed word n-grams, or
@@ -101,7 +102,7 @@ def build_dataset(train_records, test_records, *, seed, featurize, feature_versi
         for m in models]
     keys = sorted(groups)
     features = featurize([groups[k]["text"] for k in keys])
-    queries, outcomes, filled, slice_of = [], [], 0, {}
+    queries, outcomes, filled, slice_of, answers = [], [], 0, {}, {}
     for key, vector in zip(keys, features):
         g = groups[key]
         dataset_id, prompt = key
@@ -117,6 +118,8 @@ def build_dataset(train_records, test_records, *, seed, featurize, feature_versi
         slice_of[request_id] = dataset_id
         for model in models:
             record = g["rows"].get(model)
+            # Extracted answers drive the agreement cascade; missing ones never agree.
+            answers[(request_id, model)] = getattr(record, "prediction", None) if record is not None else None
             if record is None:
                 filled += 1
                 score, cost, output = 0., mean_cost[model], 0
@@ -139,7 +142,7 @@ def build_dataset(train_records, test_records, *, seed, featurize, feature_versi
         endpoints=endpoints, provenance={"source": "https://github.com/ynulihao/LLMRouterBench", "seed": seed,
             "filled_missing_scores": filled, "duplicate_records_ignored": duplicates,
             "fit_splits_of_lrb_train": {n: s for s, n in FIT_SPLITS}, "task_hints": task_hints})
-    return dataset, slice_of
+    return dataset, slice_of, answers
 
 
 def main():
@@ -153,6 +156,7 @@ def main():
     parser.add_argument("--task-hints", action="store_true", help="let the router see the dataset id (easier setting)")
     parser.add_argument("--quality-risk", type=float, default=.05)
     parser.add_argument("--include-previous", action="store_true", help="also run the previous local router (slow)")
+    parser.add_argument("--no-cascade", action="store_true", help="skip the answer-agreement cascade")
     parser.add_argument("--out", type=Path, default=ROOT / "results" / "llmrouterbench")
     args = parser.parse_args()
     lrb = args.lrb_root.resolve()
@@ -180,16 +184,18 @@ def main():
     except OSError:
         commit = None
     feature_version, featurize = featurizer(args.embedder)
-    datasets, slice_of = {}, {}
+    datasets, slice_of, answers = {}, {}, {}
     for seed, (train, test) in splits.items():
         name = f"LLMRouterBench:{Path(args.config).stem}:seed{seed}"
-        datasets[seed], groups = build_dataset(train, test, seed=seed, featurize=featurize,
+        datasets[seed], groups, seed_answers = build_dataset(train, test, seed=seed, featurize=featurize,
             feature_version=feature_version, task_hints=args.task_hints, name=name)
         slice_of.update(groups)
+        answers.update(seed_answers)
         print(f"seed {seed}: {sum(q.split=='test' for q in datasets[seed].queries)} test prompts, "
               f"{len(datasets[seed].endpoints)} models, filled {datasets[seed].provenance['filled_missing_scores']} "
               "missing scores", flush=True)
     report = run_compare(datasets=datasets, slice_of=slice_of, quality_risk=args.quality_risk,
+                         answers=None if args.no_cascade else answers,
                          local_targets=LOCAL_TARGETS if args.include_previous else (),
                          policy_overrides={"max_expected_spend": 1e9, "max_absolute_spend": 1e9},
                          progress=lambda message: print(message, flush=True))

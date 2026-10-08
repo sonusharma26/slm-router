@@ -78,11 +78,13 @@ def benchmark_compare(dataset:Optional[Path]=None, zoo:int=0, seeds:str="42,43,4
     model-zoo fixture (code-path evidence only)."""
     from inference_control.benchmarks.data import BenchmarkDataset
     from inference_control.benchmarks.compare import run_compare, write_compare_report
-    from inference_control.benchmarks.zoo import make_zoo
+    from inference_control.benchmarks.zoo import make_zoo, zoo_answers
     if (dataset is None)==(not zoo):raise typer.BadParameter("choose exactly one of --dataset and --zoo")
     data=make_zoo(zoo) if zoo else BenchmarkDataset.load(dataset)
+    answers=zoo_answers(data) if zoo else None  # imported matrices carry no answers; use the LLMRouterBench script
     seed_list=tuple(int(s) for s in seeds.split(",") if s.strip())
-    report=run_compare(data,seeds=seed_list,quality_risk=quality_risk,progress=lambda m:typer.echo(m,err=True))
+    report=run_compare(data,seeds=seed_list,quality_risk=quality_risk,answers=answers,
+                       progress=lambda m:typer.echo(m,err=True))
     write_compare_report(report,out)
     output({"report":str(out/"report.json"),"markdown":str(out/"report.md"),"claim_gate":report["claim_gate"]})
 

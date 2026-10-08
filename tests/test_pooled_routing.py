@@ -142,14 +142,31 @@ def test_predictor_beats_constant_and_leave_one_out_excludes_self():
     assert not np.allclose(loo, in_sample)
 
 
+def test_forecasts_are_identical_alone_or_in_a_batch():
+    data = make_zoo(600, seed=4)
+    train = [q for q in data.queries if q.split == "train"]
+    endpoints = [e.endpoint_id for e in data.endpoints]
+    index = {q.request.request_id: i for i, q in enumerate(train)}
+    Q = np.full((len(train), len(endpoints)), np.nan)
+    for r in data.outcomes:
+        if r.request_id in index:
+            Q[index[r.request_id], endpoints.index(r.endpoint_id)] = r.quality
+    model = QualityPredictor(PredictorConfig(neighbors=24, clusters=8)).fit([q.request.query_features for q in train], Q)
+    others = [q.request.query_features for q in data.queries if q.split == "test"][:40]
+    batch, _ = model.predict(others)
+    single = np.vstack([model.predict([x])[0] for x in others])
+    assert np.array_equal(batch, single)
+
+
 # ----- planner integration ---------------------------------------------------------------------
-@pytest.fixture(scope="module")
-def tuned():
+@pytest.fixture(scope="module", params=["utility", "threshold"])
+def tuned(request):
     data = make_zoo(2400, seed=5)
     policy = default_policy(minimum_quality=.65, missing_latency=True)
-    router = SLMRouter(data.endpoints, min_samples=8, at=AT)
+    router = SLMRouter(data.endpoints, min_samples=8, at=AT, pooled=PooledConfig(rule=request.param))
     router.fit(*split_data(data, {"train", "calibration"}))
     router.tune(*split_data(data, {"validation"}), policy)
+    assert router.map.pooled_config.rule == request.param
     return data, router, policy
 
 
@@ -158,12 +175,17 @@ def test_serving_decisions_match_the_calibration_replay(tuned):
     planner = router.planner
     feature_version = data.queries[0].request.feature_version
     evidence, calibration = planner.pooled_calibration(policy, at=AT, feature_version=feature_version)
-    assert calibration.threshold is not None
+    utility = router.map.pooled_config.rule == "utility"
+    assert (calibration.parameter if utility else calibration.threshold) is not None
     requests = evidence.calibration_requests[:60]
     quality, cost = evidence.forecast(requests)
     for i, request in enumerate(requests):
         rule = planner._pooled_rule(evidence, request, policy, quality[i], cost[i])
-        expected = next((e for e, f in rule if f >= calibration.threshold), None)
+        if utility:
+            scores = [f - calibration.parameter * c for _, f, c in rule]
+            expected = rule[scores.index(max(scores))][0] if rule else None
+        else:
+            expected = next((e for e, f, _ in rule if f >= calibration.threshold), None)
         decision = planner.decide(request, policy, at=AT)
         chosen = next(s.endpoint_id for s in decision.selected_plan.steps if isinstance(s, Call))
         if expected is not None:
@@ -191,7 +213,7 @@ def test_fallback_margin_keeps_the_best_training_endpoint(tuned):
     strict = policy.model_copy(update={"minimum_quality": 1., "version": "max-quality"})
     config = router.map.pooled_config
     router.map.configure_pooled(PooledConfig(predictor=config.predictor, thresholds=config.thresholds,
-                                             fallback_margin=1.))
+                                             fallback_margin=1., rule=config.rule))
     try:
         evidence, _ = router.planner.pooled_calibration(strict, at=AT, feature_version=data.queries[0].request.feature_version)
         anchor = max(evidence.endpoint_ids, key=lambda e: (evidence.training_mean(e), e))
@@ -201,6 +223,28 @@ def test_fallback_margin_keeps_the_best_training_endpoint(tuned):
             assert decision.selected_plan.steps[0].endpoint_id == anchor
     finally:
         router.map.configure_pooled(config)
+
+
+def test_utility_rule_certifies_all_routed_traffic(tuned):
+    data, router, policy = tuned
+    if router.map.pooled_config.rule != "utility":
+        pytest.skip("utility rule only")
+    rows = evaluate_router(router, data, policy)
+    assert all(r["metadata"]["quality_certified"] for r in rows)
+    assert sum(r["quality"] for r in rows) / len(rows) >= policy.minimum_quality - .05
+
+
+def test_rule_sequence_calibration_controls_false_certification():
+    from inference_control.routing.calibration import calibrate_sequence
+    rng = np.random.default_rng(11)
+    means = np.linspace(.95, .55, 25)  # rules ordered safest first; true mean quality falls
+    target, risk, trials, false = .75, .1, 500, 0
+    for _ in range(trials):
+        values = [(rng.random(400) < mu).astype(float) for mu in means]
+        result = calibrate_sequence(values, tuple(range(len(means))), target=target, risk=risk, minimum_requests=10)
+        if result.selected is not None and means[result.selected] < target:
+            false += 1
+    assert false / trials <= risk + 3 * math.sqrt(risk * (1 - risk) / trials)
 
 
 def test_pooled_map_config_roundtrip_changes_identity():
@@ -258,15 +302,79 @@ def test_llmrouterbench_conversion_keeps_their_test_split_and_fills_missing_scor
     script = _script()
     def record(dataset, prompt, model, score, cost=.01):
         return SimpleNamespace(dataset_id=dataset, prompt=prompt, origin_query=prompt, model_name=model, score=score,
-                               cost=cost, prompt_tokens=10, completion_tokens=5)
+                               cost=cost, prompt_tokens=10, completion_tokens=5, prediction=model.upper())
     train = [record("math", f"what is {i} plus {i}", m, float(i % 2)) for i in range(40) for m in ("a", "b")]
     test = [record("code", "write a sort", "a", 1.), record("code", "write a sort", "b", 0.),
             record("code", "fix the bug", "a", 1.)]  # model b missing on one test prompt
     version, featurize = script.featurizer(None)
-    data, slice_of = script.build_dataset(train, test, seed=1, featurize=featurize, feature_version=version,
-                                          task_hints=False, name="unit")
+    data, slice_of, answers = script.build_dataset(train, test, seed=1, featurize=featurize, feature_version=version,
+                                                   task_hints=False, name="unit")
     tests = [q for q in data.queries if q.split == "test"]
     assert len(tests) == 2 and all(q.request.task_hint is None for q in data.queries)
     assert {q.split for q in data.queries if q.text.startswith("what")} <= {"train", "calibration", "validation"}
     assert data.provenance["filled_missing_scores"] == 1
     assert set(slice_of.values()) == {"math", "code"}
+    sort_id = next(q.request.request_id for q in tests if q.text == "write a sort")
+    assert answers[(sort_id, "a")] == "A" and answers[(sort_id, "b")] == "B"
+    fix_id = next(q.request.request_id for q in tests if q.text == "fix the bug")
+    assert answers[(fix_id, "b")] is None
+
+
+# ----- answer-agreement cascades ---------------------------------------------------------------
+def test_answer_normalization_and_agreement():
+    from inference_control.routing.cascade import agreement_matrix, normalize_answer
+    assert normalize_answer("  The  Answer. ") == "the answer" and normalize_answer("") is None
+    agree = agreement_matrix([["42", " 42.", None], ["a", "b", "a"]])
+    assert agree[0, 0, 1] and not agree[0, 0, 2] and not agree[0, 2, 2]
+    assert agree[1, 0, 2] and not agree[1, 0, 1]
+
+
+def test_cascade_mechanics_by_hand():
+    from inference_control.routing.cascade import CascadeConfig, agreement_matrix, run
+    # models ordered cheap, mid, strong; forecasts make 'cheap' the first choice at this penalty
+    F = np.array([[.70, .80, .95]] * 3)
+    C = np.array([[1., 2., 10.]] * 3)
+    Q = np.array([[1., 1., 1.], [0., 0., 1.], [0., 1., 1.]])
+    answers = [["x", "x", "x"], ["wrong", "wrong", "x"], ["wrong", "x", "x"]]
+    agree = agreement_matrix(answers)
+    q, c, escalated = run(F, C, Q, C, agree, CascadeConfig(lam=.2, accept=2.))
+    # agree -> cheap answer (cost 1+2); shared mistake -> wrong but cheap; disagree -> escalate (1+2+10)
+    assert q.tolist() == [1., 0., 1.] and c.tolist() == [3., 3., 13.] and escalated.tolist() == [False, False, True]
+    q, c, _ = run(F, C, Q, C, agree, CascadeConfig(lam=.2, accept=-1.))
+    assert c.tolist() == [1., 1., 1.]  # never checks: plain price-penalty rule
+    q, c, _ = run(F, C, Q, C, agree, CascadeConfig(lam=0., accept=2.))
+    assert c.tolist() == [10., 10., 10.]  # quality-first choice needs no check
+
+
+def test_cascade_calibration_controls_false_certification():
+    from inference_control.routing import cascade
+    rng = np.random.default_rng(5)
+    p = np.array([.55, .7, .9])
+    def draw(n):
+        Q = (rng.random((n, 3)) < p).astype(float)
+        common = rng.random((n, 3)) < .5  # shared mistakes make wrong answers agree
+        answers = [["ok" if Q[i, j] else ("common" if common[i, j] else f"other{j}") for j in range(3)] for i in range(n)]
+        F = np.clip(p + rng.normal(0, .05, (n, 3)), 0, 1)
+        return F, np.broadcast_to([1., 2., 10.], (n, 3)).copy(), Q, np.broadcast_to([1., 2., 10.], (n, 3)).copy(), \
+            cascade.agreement_matrix(answers)
+    configs = cascade.default_configs((0., .02, .05, .1, .3), accepts=(-1., .6, 2.))
+    population = draw(150_000)
+    truth = {cfg: float(np.nanmean(cascade.run(*population, cfg)[0])) for cfg in configs}
+    ordered = cascade.order_configs(configs, *draw(3000))
+    target, risk, trials, false = .78, .1, 200, 0
+    assert any(v < target for v in truth.values()) and any(v >= target for v in truth.values())
+    for _ in range(trials):
+        result = cascade.calibrate(ordered, *draw(400), target=target, risk=risk, minimum_requests=20)
+        if result.selected is not None and truth[result.selected] < target:
+            false += 1
+    assert false / trials <= risk + 3 * math.sqrt(risk * (1 - risk) / trials)
+
+
+def test_compare_reports_cascade_with_answers():
+    from inference_control.benchmarks.zoo import zoo_answers
+    data = make_zoo(500, seed=9)
+    report = run_compare(data, seeds=(1,), targets=(.6, 1.), knn_targets=(.5,), thresholds=(.5,), local_targets=(),
+                         answers=zoo_answers(data))
+    assert "slm-cascade" in report["aggregate"]
+    routers = {c["router"] for c in report["pooled_guarantee"]["checks"]}
+    assert routers == {"slm-router", "slm-cascade"}

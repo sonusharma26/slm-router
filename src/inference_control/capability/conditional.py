@@ -588,22 +588,30 @@ class ConditionalCapabilityMap:
 
     def pooled_estimate(self, evidence: PooledEvidence, request: RequestContext, endpoint: EndpointSnapshot,
                         quality_forecast: float, numbers: dict, *, at: datetime, quality_risk: float,
-                        target: float | None = None, calibration=None, artifact_base: str | None = None):
-        """Assemble a CapabilityEstimate; ``quality.lower`` carries the certified population bound."""
+                        target: float | None = None, calibration=None, artifact_base: str | None = None,
+                        certified: bool | None = None):
+        """Assemble a CapabilityEstimate; ``quality.lower`` carries the certified population bound.
+
+        ``certified`` is decided by the planner's calibrated rule; when omitted, a threshold
+        calibration certifies forecasts at or above its threshold.
+        """
         from inference_control.planning.planner import CapabilityEstimate
         if quality_forecast != quality_forecast:  # NaN: no learned forecast
             return None
         q = float(min(1., max(0., quality_forecast)))
-        certified = (calibration is not None and calibration.threshold is not None and target is not None
-                     and q >= calibration.threshold)
+        calibrated = calibration is not None and (getattr(calibration, "threshold", None) is not None
+                                                  or getattr(calibration, "parameter", None) is not None)
+        if certified is None:
+            certified = (calibrated and target is not None and calibration.threshold is not None
+                         and q >= calibration.threshold)
+        certified = bool(certified and calibrated and target is not None)
         if certified:
             quality = Prediction(mean=min(1., max(target, q)), lower=target, upper=1.)
         else:
             quality = Prediction(mean=q, lower=0., upper=1.)
         reasons = list(numbers["reasons"])
         if not certified:
-            reasons.insert(0, "POOLED_NOT_CERTIFIED" if calibration is not None and calibration.threshold is not None
-                           else "POOLED_UNCALIBRATED")
+            reasons.insert(0, "POOLED_NOT_CERTIFIED" if calibrated else "POOLED_UNCALIBRATED")
         info = evidence.endpoints[endpoint.endpoint_id]
         diagnostics = QualityBoundDiagnostics(method=POOLED_METHOD, predictor="learned", raw_prediction=q,
             prediction_sample_size=info.training_outcomes, prediction_projection=quality.mean - q,

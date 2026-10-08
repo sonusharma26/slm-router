@@ -23,6 +23,8 @@ from itertools import pairwise
 from pathlib import Path
 from statistics import mean, pstdev
 
+import numpy as np
+
 from inference_control.benchmarks.data import BenchmarkDataset, grouped_split
 from inference_control.benchmarks.routers import Baseline, Selection, SLMRouter
 from inference_control.benchmarks.runner import default_policy, environment, evaluate_router, split_data
@@ -159,10 +161,59 @@ def _point(label, rows, slice_of=None, **settings):
     return {"label": label, **settings, **summary}
 
 
+def cascade_runs(slm, dataset, policy, targets, answers, *, at, quality_risk, minimum_requests, slice_of=None):
+    """Calibrate and evaluate answer-agreement cascades on a full-information split.
+
+    Uses the fitted pooled router's forecasts. Configurations are ordered on training
+    references (leave-one-out forecasts), calibrated on the calibration split per target and
+    scored on test. Every endpoint is assumed allowed (the harness policy sets no limits).
+    """
+    from inference_control.routing import cascade
+    from inference_control.routing.calibration import utility_grid
+    lookup = {(r.request_id, r.endpoint_id): r for r in dataset.outcomes}
+    feature_version = dataset.queries[0].request.feature_version
+    evidence = slm.planner._pooled_evidence(policy(targets[0]), at, feature_version)
+    ids = evidence.endpoint_ids
+    train_cost = np.nanmean(np.where(np.isnan(evidence.train_cost), np.nan, evidence.train_cost), axis=0) \
+        if len(evidence.train_requests) else np.zeros(len(ids))
+    def matrices(requests, forecasts=None):
+        F, C = forecasts if forecasts is not None else evidence.forecast(requests)
+        C = np.where(np.isnan(C), np.broadcast_to(np.nan_to_num(train_cost), C.shape), C)
+        Q = np.array([[lookup[(r.request_id, e)].quality for e in ids] for r in requests])
+        R = np.array([[lookup[(r.request_id, e)].cost for e in ids] for r in requests])
+        A = cascade.agreement_matrix([[answers.get((r.request_id, e)) for e in ids] for r in requests])
+        return F, C, Q, R, A
+    reference = matrices(evidence.train_requests, evidence.training_forecasts())
+    grid = utility_grid(reference[0], reference[1], steps=30)
+    configs = cascade.order_configs(cascade.default_configs(grid), *reference)
+    calibration_set = matrices(evidence.calibration_requests)
+    test_requests = [q.request for q in dataset.queries if q.split == "test"]
+    test = matrices(test_requests)
+    points, checks = [], []
+    for target in targets:
+        result = cascade.calibrate(configs, *calibration_set, target=target, risk=quality_risk,
+                                   minimum_requests=minimum_requests)
+        config = result.selected or configs[0]
+        q, c, escalated = cascade.run(*test, config)
+        _, _, _, check = cascade.plan(test[0], test[1], config)
+        rows = [{"request_id": r.request_id, "quality": float(qi), "cost": float(ci), "abstained": False,
+                 "metadata": {"quality_certified": result.selected is not None}}
+                for r, qi, ci in zip(test_requests, q, c)]
+        point = _point(f"target={target}", rows, slice_of, target=target, lam=config.lam, accept=config.accept,
+                       check_rate=float(check.mean()), escalation_rate=float(escalated.mean()))
+        points.append(point)
+        checks.append({"router": "slm-cascade", "target": target, "threshold": None, "price_penalty": config.lam,
+                       "accept": config.accept, "calibration_certified": result.calibration_requests if result.selected else 0,
+                       "calibration_requests": result.calibration_requests, "calibration_mean": result.certified_mean,
+                       "test_certified_share": point["certified_share"], "test_certified_quality": point["certified_quality"],
+                       "holds": point["certified_quality"] is None or point["certified_quality"] >= target})
+    return points, checks
+
+
 def compare_split(dataset: BenchmarkDataset, *, seed: int, targets=DEFAULT_TARGETS, knn_targets=KNN_TARGETS,
                   thresholds=THRESHOLDS, local_targets=LOCAL_TARGETS, quality_risk: float = .05,
                   min_samples: int = 8, slice_of=None, at=None, progress=None,
-                  policy_overrides: dict | None = None) -> dict:
+                  policy_overrides: dict | None = None, answers: dict | None = None) -> dict:
     """Evaluate all routers on one fixed split; returns operating points and frontier summaries."""
     at = at or datetime(2026, 1, 1, tzinfo=UTC)
     train, train_rows = split_data(dataset, {"train"})
@@ -210,7 +261,8 @@ def compare_split(dataset: BenchmarkDataset, *, seed: int, targets=DEFAULT_TARGE
         runs["slm-router"].append(point)
         feature_version = fit[0].request.feature_version
         _, calibration = slm.planner.pooled_calibration(policy(target), at=at, feature_version=feature_version)
-        guarantee.append({"target": target, "threshold": calibration.threshold,
+        guarantee.append({"router": "slm-router", "target": target, "threshold": calibration.threshold,
+                          "price_penalty": getattr(calibration, "parameter", None),
                           "calibration_certified": calibration.certified_count,
                           "calibration_requests": calibration.calibration_requests,
                           "calibration_mean": calibration.certified_mean,
@@ -218,6 +270,12 @@ def compare_split(dataset: BenchmarkDataset, *, seed: int, targets=DEFAULT_TARGE
                           "test_certified_quality": point["certified_quality"],
                           "holds": point["certified_quality"] is None or point["certified_quality"] >= target})
     note("pooled router sweep done")
+    if answers:
+        runs["slm-cascade"], cascade_checks = cascade_runs(
+            slm, dataset, policy, tuple(targets), answers, at=at, quality_risk=quality_risk,
+            minimum_requests=min_samples, slice_of=slice_of)
+        guarantee.extend(cascade_checks)
+        note("cascade sweep done")
     if local_targets:
         local = SLMRouter(dataset.endpoints, min_samples=min_samples, at=at, quality_method="local-mean-kl",
                           name="slm-router-local (previous)")
@@ -324,13 +382,13 @@ def write_compare_report(report: dict, out) -> Path:
     lines += ["", "## Pooled quality guarantee", "",
               (f"{checks['certified_checks']} target/split checks had certified test traffic; "
                f"{len(checks['violations'])} fell below target."), "",
-              "| Split | Target | Certified share (test) | Certified mean (test) | Calibration mean | Holds |",
-              "|---|---:|---:|---:|---:|---|"]
+              "| Router | Split | Target | Certified share (test) | Certified mean (test) | Calibration mean | Holds |",
+              "|---|---|---:|---:|---:|---:|---|"]
     for c in checks["checks"]:
         mean_test = f"{c['test_certified_quality']:.3f}" if c["test_certified_quality"] is not None else "—"
         mean_cal = f"{c['calibration_mean']:.3f}" if c["calibration_mean"] is not None else "—"
-        lines.append(f"| {c['seed']} | {c['target']} | {c['test_certified_share']:.0%} | {mean_test} | {mean_cal} | "
-                     f"{'yes' if c['holds'] else 'NO'} |")
+        lines.append(f"| {c.get('router', 'slm-router')} | {c['seed']} | {c['target']} | {c['test_certified_share']:.0%} | "
+                     f"{mean_test} | {mean_cal} | {'yes' if c['holds'] else 'NO'} |")
     lines += ["", "## Claim gate", "", *[f"- {b}" for b in report["claim_gate"]["blockers"]], "",
               *[f"- {n}" for n in report["notes"]]]
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

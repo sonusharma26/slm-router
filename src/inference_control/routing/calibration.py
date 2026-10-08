@@ -230,3 +230,114 @@ def calibrate_threshold(ordered_forecasts: np.ndarray, ordered_quality: np.ndarr
                 break
             selected = threshold
     return ThresholdCalibration(selected, target, risk, n, minimum_certified, tuple(steps))
+
+
+@dataclass(frozen=True)
+class SequenceStep:
+    parameter: float | str
+    requests: int
+    mean_quality: float | None
+    p_value: float
+    rejected: bool
+
+
+@dataclass(frozen=True)
+class SequenceCalibration:
+    """Fixed-sequence learn-then-test over whole routing rules (every routed request counts).
+
+    ``selected`` is the index of the last rejected rule in the declared order, or None.
+    With probability at least ``1 - risk`` the mean quality over all requests routed by
+    the selected rule is at least ``target``.
+    """
+    selected: int | None
+    parameters: tuple
+    target: float
+    risk: float
+    calibration_requests: int
+    minimum_requests: int
+    steps: tuple[SequenceStep, ...]
+    kind: str = "utility"
+    method: str = "hb-fixed-sequence-rules-v1"
+
+    @property
+    def threshold(self):  # threshold-rule compatibility: rule calibrations certify by parameter, not threshold
+        return None
+
+    @property
+    def parameter(self):
+        return self.parameters[self.selected] if self.selected is not None else None
+
+    @property
+    def certified_mean(self) -> float | None:
+        return self.steps[self.selected].mean_quality if self.selected is not None else None
+
+    @property
+    def certified_count(self) -> int:
+        return self.steps[self.selected].requests if self.selected is not None else 0
+
+    def identity(self) -> dict:
+        value = asdict(self)
+        value["steps"] = [asdict(step) for step in self.steps]
+        return value
+
+
+def calibrate_sequence(values, parameters, *, target: float, risk: float, minimum_requests: int = 30,
+                       kind: str = "utility") -> SequenceCalibration:
+    """Test rules in their declared order (safest first); stop at the first non-rejection.
+
+    ``values[k]`` holds the realized quality of every calibration request under rule k.
+    The order must be fixed without calibration outcomes.
+    """
+    if not 0 < risk < 1:
+        raise ValueError("risk must lie in (0, 1)")
+    if len(values) != len(parameters):
+        raise ValueError("one value array per rule required")
+    steps, selected, n = [], None, 0
+    for index, (rule_values, parameter) in enumerate(zip(values, parameters)):
+        array = np.asarray(rule_values, dtype=float)
+        if np.isnan(array).any():
+            raise ValueError("calibration needs a realized quality for every routed request")
+        n = len(array)
+        total = float(array.sum())
+        p_value = hb_pvalue(total, n, target) if n >= minimum_requests else 1.
+        rejected = p_value <= risk
+        steps.append(SequenceStep(parameter, n, total / n if n else None, p_value, rejected))
+        if not rejected:
+            break
+        selected = index
+    return SequenceCalibration(selected, tuple(parameters), target, risk, n, minimum_requests, tuple(steps), kind)
+
+
+def utility_choice(forecasts: np.ndarray, costs: np.ndarray, lam: float) -> np.ndarray:
+    """Position of argmax(forecast - lam * cost) per row; ties resolve to the earliest position.
+
+    Disallowed positions carry forecast -inf. Rows with no allowed position return -1.
+    """
+    score = np.where(np.isfinite(forecasts), forecasts - lam * np.nan_to_num(costs), -np.inf)
+    choice = np.argmax(score, axis=1)
+    choice[~np.isfinite(score).any(axis=1)] = -1
+    return choice
+
+
+def utility_grid(forecasts, costs, steps: int = 120) -> tuple[float, ...]:
+    """Price penalties from 0 (quality first) upward, at the points where choices switch.
+
+    For every reference request and pair of allowed endpoints where the dearer one has the
+    higher forecast, the rule switches between them at (f_a - f_b) / (c_a - c_b). The grid
+    takes quantiles of those switching points. It uses forecasts and expected costs of
+    outcome-independent references only; ascending, so the sequence runs from the most
+    expensive rule to the cheapest.
+    """
+    F = np.asarray(forecasts, dtype=float)
+    C = np.nan_to_num(np.asarray(costs, dtype=float), nan=np.inf)
+    if F.size == 0:
+        return (0.,)
+    df = F[:, :, None] - F[:, None, :]
+    dc = C[:, :, None] - C[:, None, :]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = np.where((df > 0) & (dc > 0) & np.isfinite(df) & np.isfinite(dc), df / dc, np.nan)
+    points = ratio[np.isfinite(ratio)]
+    if not len(points):
+        return (0.,)
+    grid = np.unique(np.quantile(points, np.linspace(0, 1, steps)))
+    return (0.,) + tuple(float(x) * (1 + 1e-9) for x in grid if x > 0)

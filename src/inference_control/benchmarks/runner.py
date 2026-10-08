@@ -189,7 +189,8 @@ def write_report(report,out):
         if report.get("quality_diagnostics",{}).get("method")=="pooled-ltt":
             d=report["quality_diagnostics"]
             lines += ["","## Pooled calibration","",
-                      f"Target {d['quality_target']} at risk {d['quality_risk']}; selected threshold: {d['threshold']}.",
+                      f"Target {d['quality_target']} at risk {d['quality_risk']}; rule: {d.get('rule','threshold')}; "
+                      + (f"price penalty: {d['price_penalty']}." if d.get('rule')=="utility" else f"selected threshold: {d['threshold']}."),
                       f"Certified {d['certified_calibration_requests']} of {d['calibration_requests']} calibration requests"
                       + (f" with mean quality {d['certified_calibration_mean']:.4f}." if d['certified_calibration_mean'] is not None else "."),
                       "The guarantee covers the mean quality of certified traffic, not individual answers."]

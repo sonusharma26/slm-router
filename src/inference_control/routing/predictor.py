@@ -21,6 +21,8 @@ from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
+_SIMILARITY_DECIMALS = 9
+
 
 @dataclass(frozen=True)
 class PredictorConfig:
@@ -208,9 +210,11 @@ class QualityPredictor:
                 qs = self._Q0[rows].sum(0) - self._Q0[j]
                 qn = self._qmask[rows].sum(0) - self._qmask[j]
                 base_q[i] = (qs + prior * self._global_q) / (qn + prior)
-        sims = X @ self._centroids.T
+        # Similarities are rounded before selection, and ties break by index, so one request
+        # gets the same forecast alone or in a batch (BLAS rounding differs between the two).
+        sims = np.round(X @ self._centroids.T, _SIMILARITY_DECIMALS)
         top_n = min(cfg.cluster_top, sims.shape[1])
-        top = np.argpartition(-sims, top_n - 1, axis=1)[:, :top_n]
+        top = np.argsort(-sims, axis=1, kind="stable")[:, :top_n]
         top_sims = np.take_along_axis(sims, top, axis=1)
         weights = np.exp(cfg.sharpness * (top_sims - top_sims.max(axis=1, keepdims=True)))
         weights /= weights.sum(axis=1, keepdims=True)
@@ -243,7 +247,7 @@ class QualityPredictor:
         use_slices = cfg.slice_neighbors and bool(self._slice_q) and any(query_slices != "")
         for start in range(0, n, batch):
             stop = min(n, start + batch)
-            S = X[start:stop] @ self._X.T
+            S = np.round(X[start:stop] @ self._X.T, _SIMILARITY_DECIMALS)
             if use_slices:
                 same = (query_slices[start:stop, None] == self._train_slices[None, :]) & (query_slices[start:stop, None] != "")
                 S = S + same.astype(float)
@@ -251,7 +255,7 @@ class QualityPredictor:
                 rows = np.arange(stop - start)
                 valid = exclude[start:stop] >= 0
                 S[rows[valid], exclude[start:stop][valid]] = -np.inf
-            index = np.argpartition(-S, k - 1, axis=1)[:, :k]
+            index = np.argsort(-S, axis=1, kind="stable")[:, :k]
             near = np.take_along_axis(S, index, axis=1)
             w = np.exp(cfg.sharpness * (near - near.max(axis=1, keepdims=True)))
             qm = self._qmask[index]

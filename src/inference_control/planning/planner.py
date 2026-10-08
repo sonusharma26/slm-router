@@ -216,7 +216,7 @@ class Planner:
 
         Replays generate() eligibility, the hard gates of reasons(), the failure gate and the
         selection key exactly as serving applies them; only the quality gate is left open.
-        Returns a list of (endpoint_id, forecast) in selection order, or None when planning
+        Returns (endpoint_id, forecast, expected cost) in selection order, or None when planning
         would be incomplete (the planner then never routes the request).
         """
         cmap = self.capability_map
@@ -246,8 +246,8 @@ class Planner:
                 continue
             if policy.maximum_failure_probability < 1 and stub.failure.upper > policy.maximum_failure_probability:
                 continue
-            allowed.append((self.selection_key((plan, stub), policy), endpoint_id, forecast))
-        return [(endpoint_id, forecast) for _, endpoint_id, forecast in sorted(allowed)]
+            allowed.append((self.selection_key((plan, stub), policy), endpoint_id, forecast, numbers["cost"][0]))
+        return [(endpoint_id, forecast, cost_mean) for _, endpoint_id, forecast, cost_mean in sorted(allowed)]
 
     def _pooled_reference(self, evidence, requests, policy, quality, cost, outcomes=None):
         """Ordered forecasts/outcomes of the routing rule on outcome-independent references."""
@@ -258,12 +258,12 @@ class Planner:
         best, every = [], []
         for i, request in enumerate(requests):
             rule = self._pooled_rule(evidence, request, policy, quality[i], cost[i]) or []
-            for position, (endpoint_id, forecast) in enumerate(rule):
+            for position, (endpoint_id, forecast, _) in enumerate(rule):
                 ordered_f[i, position] = forecast
                 if outcomes is not None:
                     ordered_v[i, position] = outcomes[i, evidence.column(endpoint_id)]
-            best.append(max((f for _, f in rule), default=float("-inf")))
-            every.extend(f for _, f in rule)
+            best.append(max((f for _, f, _ in rule), default=float("-inf")))
+            every.extend(f for _, f, _ in rule)
         return ordered_f, ordered_v, best, every
 
     def pooled_threshold_grid(self, requests, policy, *, at=None, fractions=None) -> tuple[float, ...]:
@@ -289,6 +289,12 @@ class Planner:
         cached = self._pooled_calibrations.get(key)
         if cached is not None:
             return evidence, cached[0]
+        if cmap.pooled_config.rule == "utility":
+            calibration = self._utility_calibration(evidence, policy)
+            if len(self._pooled_calibrations) >= 64:
+                self._pooled_calibrations.clear()
+            self._pooled_calibrations[key] = (calibration, digest(calibration.identity()))
+            return evidence, calibration
         requests = evidence.calibration_requests
         quality, cost = evidence.forecast(requests)
         m = len(evidence.endpoint_ids)
@@ -297,10 +303,10 @@ class Planner:
             rule = self._pooled_rule(evidence, request, policy, quality[i], cost[i])
             row_f, row_q = np.full(m, -np.inf), np.full(m, np.nan)
             if rule:
-                values = [evidence.calibration_quality[i, evidence.column(e)] for e, _ in rule]
+                values = [evidence.calibration_quality[i, evidence.column(e)] for e, _, _ in rule]
                 if any(v != v for v in values):
                     continue  # not scored on every allowed endpoint: excluded from calibration
-                for position, ((_, forecast), value) in enumerate(zip(rule, values)):
+                for position, ((_, forecast, _), value) in enumerate(zip(rule, values)):
                     row_f[position], row_q[position] = forecast, value
             forecasts.append(row_f)
             outcomes.append(row_q)
@@ -324,6 +330,61 @@ class Planner:
             self._pooled_calibrations.clear()
         self._pooled_calibrations[key] = (calibration, digest(calibration.identity()))
         return evidence, calibration
+
+    def _rule_matrices(self, evidence, requests, policy, quality, cost, outcomes=None):
+        """Forecast, expected-cost and outcome matrices in each request's selection order."""
+        import numpy as np
+        m = len(evidence.endpoint_ids)
+        F = np.full((len(requests), m), -np.inf)
+        C = np.full((len(requests), m), np.nan)
+        V = np.full((len(requests), m), np.nan)
+        complete = np.ones(len(requests), dtype=bool)
+        for i, request in enumerate(requests):
+            rule = self._pooled_rule(evidence, request, policy, quality[i], cost[i]) or []
+            for position, (endpoint_id, forecast, cost_mean) in enumerate(rule):
+                F[i, position], C[i, position] = forecast, cost_mean
+                if outcomes is not None:
+                    V[i, position] = outcomes[i, evidence.column(endpoint_id)]
+                    complete[i] &= V[i, position] == V[i, position]
+        return F, C, V, complete
+
+    def _utility_calibration(self, evidence, policy):
+        """Learn-then-test over price penalties: lambda = 0 (quality first) upward to cheap."""
+        from inference_control.routing.calibration import calibrate_sequence, utility_choice, utility_grid
+        import numpy as np
+        cmap = self.capability_map
+        train_q, train_c = evidence.training_forecasts()
+        ref_f, ref_cost, _, _ = self._rule_matrices(evidence, evidence.train_requests, policy, train_q, train_c)
+        grid = utility_grid(ref_f, ref_cost)
+        requests = evidence.calibration_requests
+        quality, cost = evidence.forecast(requests)
+        F, C, V, complete = self._rule_matrices(evidence, requests, policy, quality, cost,
+                                                evidence.calibration_quality)
+        routable = np.isfinite(F).any(axis=1) & complete  # unscored allowed endpoints: excluded
+        F, C, V = F[routable], C[routable], V[routable]
+        rows = np.arange(len(F))
+        values = []
+        for lam in grid:
+            choice = utility_choice(F, C, lam)
+            values.append(V[rows, choice])
+        minimum = max(cmap.min_samples, policy.minimum_evidence_samples)
+        return calibrate_sequence(values, grid, target=policy.minimum_quality, risk=policy.quality_risk,
+                                  minimum_requests=minimum, kind="utility")
+
+    def _certified_endpoint(self, rule, calibration):
+        """The endpoint the calibrated rule certifies for one request, or None."""
+        if not rule or calibration is None:
+            return None
+        parameter = getattr(calibration, "parameter", None)
+        if getattr(calibration, "kind", None) == "utility":
+            if parameter is None:
+                return None
+            best = max(range(len(rule)), key=lambda k: (rule[k][1] - parameter * rule[k][2], -k))
+            return rule[best][0]
+        threshold = getattr(calibration, "threshold", None)
+        if threshold is None:
+            return None
+        return next((endpoint for endpoint, forecast, _ in rule if forecast >= threshold), None)
 
     def _calibration_digest(self, calibration) -> str:
         for stored, value in self._pooled_calibrations.values():
@@ -369,6 +430,8 @@ class Planner:
         base = digest({"method": POOLED, "evidence": evidence.identity,
                        "calibration": self._calibration_digest(calibration), "policy": self._digest_once(policy)})
         minimum = max(cmap.min_samples, policy.minimum_evidence_samples)
+        rule = self._pooled_rule(evidence, request, policy, quality[0], cost[0])
+        chosen = self._certified_endpoint(rule, calibration)
         candidates = []
         for plan in direct:
             endpoint = self.endpoints[plan.steps[0].endpoint_id]
@@ -381,7 +444,7 @@ class Planner:
                 comparisons=len(direct), minimum=minimum)
             estimate = cmap.pooled_estimate(evidence, request, endpoint, float(quality[0, column]), numbers,
                 at=at, quality_risk=policy.quality_risk, target=policy.minimum_quality,
-                calibration=calibration, artifact_base=base)
+                calibration=calibration, artifact_base=base, certified=endpoint.endpoint_id == chosen)
             candidates.append((plan, estimate))
         return tuple(candidates), rejected
 

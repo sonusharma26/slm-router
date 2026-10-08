@@ -100,3 +100,31 @@ def make_zoo(n: int = 4000, seed: int = 7, *, task_hints: bool = False) -> Bench
         outcomes=outcomes, endpoints=endpoints, provenance={"seed": seed, "task_hints": task_hints,
         "purpose": "routing code-path fixture with domain specialists; not empirical evidence",
         "quality": "simulated binary correctness from a latent skill model"})
+
+
+FREE_FORM = frozenset({"writing"})  # outputs that never match exactly, like real essays
+
+
+def zoo_answers(dataset: BenchmarkDataset) -> dict[tuple[str, str], str]:
+    """Simulated extracted answers for the zoo (synthetic; for cascade code paths only).
+
+    A correct model gives the reference answer. Wrong models share mistakes: half the time
+    the common wrong answer, otherwise one of three others, so two wrong models agree about
+    a third of the time. Free-form domains get unique outputs that never agree.
+    """
+    seed = dataset.provenance.get("seed", 7)
+    domains = {}
+    for query in dataset.queries:
+        words = set(query.text.split())
+        domains[query.request.request_id] = max(DOMAINS, key=lambda d: (len(words & set(DOMAINS[d])), d))
+    answers = {}
+    for row in dataset.outcomes:
+        key = (row.request_id, row.endpoint_id)
+        if domains[row.request_id] in FREE_FORM:
+            answers[key] = f"free-form:{row.endpoint_id}:{row.request_id}"
+        elif row.quality >= 1:
+            answers[key] = "reference"
+        else:
+            draw = _unit(seed, row.request_id, row.endpoint_id, "answer")
+            answers[key] = "common-mistake" if draw < .5 else f"mistake-{int((draw - .5) * 6)}"
+    return answers
