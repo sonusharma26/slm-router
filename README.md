@@ -34,7 +34,7 @@ To run from a checkout without an editable install, put `src` on `PYTHONPATH` an
 
 | Area | Implemented release behavior |
 |---|---|
-| Plan search | Direct, two-call error cascade, two-call verify/escalate, two-branch parallel/select and abstention. Compound plans require their own measured joint evidence. |
+| Plan search | Direct, two-call error cascade, two-call verify/escalate, answer-agreement escalate (pooled routing, opt-in), two-branch parallel/select and abstention. Compound plans require their own measured joint evidence. |
 | Conditional evidence | Frozen query features, exact task/governance/schema slices, length buckets, kNN estimates, distinct train/calibration requests, hashes, sample counts, staleness and uncertainty. |
 | Enforcement | Bound-aware eligibility, cumulative call/spend reservation, exact-request certificates, dependency invalidation, pre-dispatch rechecks, no automatic provider retries and explicit unknown accounting. |
 | Adaptive recovery | Decision-boundary acquisition, durable UTC daily budgets, snapshot drift, windowed quality/latency/failure monitoring, targeted metric invalidation, and recovery acknowledgement. |
@@ -222,7 +222,7 @@ New capability maps use **pooled learned routing** (`pooled-ltt`):
 2. **Certify.** The planner calibrates its own routing rule on calibration requests that were scored on every eligible endpoint. It certifies the cheapest endpoint whose forecast clears a threshold chosen by a fixed-sequence learn-then-test, so that, with probability at least `1 - quality_risk`, mean quality over all certified traffic is at least `minimum_quality`.
 3. **Fall back.** Requests it cannot certify go to the endpoint with the best forecast (`on_infeasible: best_predicted_fallback`, the default unless `evidence.require_certificate: true`). Hard limits on spend, deadline, privacy and calls still apply.
 
-By default the router routes each request to the endpoint with the best forecast quality minus a calibrated price penalty, which covers all routed traffic with the guarantee. An offline **answer-checking cascade** (`inference_control.routing.cascade`) goes further: it accepts a cheap answer when a second model agrees and escalates when they disagree. On the synthetic zoo it reaches AIQ 0.905, against 0.878 for kNN. See [cascade routing](docs/release/CASCADE_ROUTING_2026-10-09.md).
+By default the router routes each request to the endpoint with the best forecast quality minus a calibrated price penalty, which covers all routed traffic with the guarantee. An **answer-checking cascade** (`inference_control.routing.cascade`) goes further: it accepts a cheap answer when a second model agrees and escalates when they disagree. It is evaluated offline, and served live through the opt-in `agree_escalate` plan when the capability map stores answers (`plans.allowed: [direct, agree_escalate]`, `max_calls >= 2`, `plans.verifier: answer_agreement`). On the synthetic zoo it reaches AIQ 0.905, against 0.878 for kNN. See [cascade routing](docs/release/CASCADE_ROUTING_2026-10-09.md).
 
 The per-neighborhood estimators (`local-mean-kl`, `local-mean-hoeffding`) remain available. See [pooled routing](docs/release/POOLED_ROUTING_2026-10-08.md) for the method, assumptions and measured results.
 

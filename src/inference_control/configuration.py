@@ -13,6 +13,7 @@ from inference_control.ledger import SQLiteLedger
 from inference_control.adapters.providers import OpenAICompatibleAdapter
 from inference_control.adapters.runtime import RuntimeProviderAdapter
 from inference_control.execution import Executor
+from inference_control.execution.agreement import answer_agreement
 from inference_control.api.app import ControlPlane,create_app
 
 
@@ -68,7 +69,9 @@ def load_service(path):
     # Bounded built-ins are sanity checks, NOT correctness oracles. Their behavior must be included in joint evidence.
     verifiers={"nonempty":lambda result,rule:bool(result.message and (result.message.get("content") or result.message.get("tool_calls")))}
     selectors={"first_success":lambda results:results[0]}
-    executor=Executor(bridge,verifiers=verifiers,selectors=selectors)
+    # Agreement functions for agree_escalate plans; policies name one through plans.verifier.
+    agreements={"answer_agreement":answer_agreement}
+    executor=Executor(bridge,verifiers=verifiers,selectors=selectors,agreements=agreements)
     planner=Planner(endpoints,capability_map=cmap)
     control=ControlPlane(planner,SQLiteLedger(file(config.ledger)),executor,default_policy=policy)
     # Explicit file changes become new snapshots; never mutate or silently ignore historical identities.

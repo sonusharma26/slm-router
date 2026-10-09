@@ -25,7 +25,7 @@ class Privacy(Strict):
     boundary: str = "any"
 
 class Plans(Strict):
-    allowed: list[Literal["direct", "cascade", "verify_escalate", "parallel", "abstain"]] = ["direct"]
+    allowed: list[Literal["direct", "cascade", "verify_escalate", "agree_escalate", "parallel", "abstain"]] = ["direct"]
     max_calls: int = Field(default=1, ge=0, le=8)
     verifier: str | None = None
     selector: str | None = None
@@ -69,10 +69,14 @@ def compile_policy(value: dict | str | Path) -> PolicySpec:
         raise ValueError("at least one plan type is required")
     if allowed - {"abstain"} and doc.plans.max_calls == 0:
         raise ValueError("non-abstain plans require calls")
-    if allowed & {"cascade", "parallel", "verify_escalate"} and doc.plans.max_calls < 2:
+    if allowed & {"cascade", "parallel", "verify_escalate", "agree_escalate"} and doc.plans.max_calls < 2:
         raise ValueError("compound plans require at least two calls")
     if "verify_escalate" in allowed and not doc.plans.verifier:
         raise ValueError("verify_escalate requires an explicitly registered local verifier")
+    if "agree_escalate" in allowed and not doc.plans.verifier:
+        raise ValueError("agree_escalate requires an explicitly registered answer-agreement function (plans.verifier)")
+    if "agree_escalate" in allowed and "direct" not in allowed:
+        raise ValueError("agree_escalate serves unchecked requests directly, so it also requires the direct plan type")
     if "parallel" in allowed and not doc.plans.selector:
         raise ValueError("parallel requires an explicitly registered local selector")
     on_infeasible = doc.on_infeasible or ("abstain" if doc.evidence.require_certificate else "best_predicted_fallback")

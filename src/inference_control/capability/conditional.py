@@ -5,19 +5,31 @@ individual prompt. No test label, oracle answer or post-response feature enters 
 """
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
+import hashlib
 import math
+import re
 from statistics import mean
 from functools import lru_cache
 from typing import Literal
 from pydantic import Field, model_validator
 from inference_control.contracts import FrozenContract, RequestContext, Prediction, EndpointSnapshot
 from inference_control.util import JsonNative, digest, digest_native
-from inference_control.routing.pooled import (POOLED_ASSUMPTIONS, POOLED_METHOD, EndpointEvidence,
-                                              PooledConfig, PooledEvidence)
+from inference_control.routing.cascade import normalize_answer
+from inference_control.routing.pooled import (CASCADE_ASSUMPTIONS, POOLED_ASSUMPTIONS, POOLED_METHOD,
+                                              EndpointEvidence, PooledConfig, PooledEvidence)
 
 
 QualityMethod = Literal["local-mean-hoeffding", "local-mean-kl", "pooled-ltt"]
 QualityPredictor = Literal["local", "cohort-mean", "learned"]
+
+
+_ANSWER_KEY = re.compile(r"[0-9a-f]{16}")
+
+
+def answer_key(answer) -> str | None:
+    """Short hash of an extracted answer's normalized form (never the text); None if not comparable."""
+    normalized = normalize_answer(answer)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16] if normalized is not None else None
 
 
 def binary_kl(observed: float, candidate: float) -> float:
@@ -227,6 +239,10 @@ class ConditionalCapabilityMap:
         self._strata: dict[str, tuple[EvidenceObservation, str, str]] = {}
         self._row_dumps: dict[str, tuple[EvidenceObservation, JsonNative]] = {}
         self._request_strata: dict[str, tuple[RequestContext, dict[bool, str]]] = {}
+        # sample_id -> hashed comparable answer (None: recorded, nothing comparable). Empty on maps
+        # that never stored answers, so their versions and exports are unchanged.
+        self._answers: dict[str, str | None] = {}
+        self._answers_digest: str | None = None
 
     @property
     def quality_method(self) -> QualityMethod:
@@ -257,6 +273,8 @@ class ConditionalCapabilityMap:
                 "invalidations":self.invalidations}
             if self.quality_method == POOLED_METHOD:
                 identity["pooled"] = self._pooled_config.identity()
+            if self._answers:
+                identity["answers"] = self.answers_digest
             self._version = "map:" + digest(identity)
         return self._version
 
@@ -264,9 +282,50 @@ class ConditionalCapabilityMap:
     def evidence_version(self) -> str:
         """Rows and invalidations only; unchanged by estimator configuration."""
         if self._base_version is None:
-            self._base_version = digest({"rows":{key:self._row_hash(self.rows[key]) for key in sorted(self.rows)},
-                                         "invalidations":self.invalidations})
+            identity = {"rows":{key:self._row_hash(self.rows[key]) for key in sorted(self.rows)},
+                        "invalidations":self.invalidations}
+            if self._answers:
+                identity["answers"] = self.answers_digest
+            self._base_version = digest(identity)
         return self._base_version
+
+    @property
+    def answers(self) -> dict[str, str | None]:
+        """Copy of the stored answer hashes by sample_id."""
+        return dict(self._answers)
+
+    @property
+    def answers_digest(self) -> str | None:
+        if not self._answers:
+            return None
+        if self._answers_digest is None:
+            self._answers_digest = digest_native([[key, self._answers[key]] for key in sorted(self._answers)])
+        return self._answers_digest
+
+    def add_answers(self, answers: dict, *, hashed: bool = False) -> None:
+        """Store the comparable answer each evidence row produced, as a hash of its normalized form.
+
+        ``answers`` maps ``sample_id`` to the extracted answer text, or None when the endpoint gave
+        nothing comparable (recorded, but it never agrees with another answer). Raw text is not kept.
+        A sample absent from ``answers`` has no recorded answer and is excluded from cascade
+        calibration. ``hashed=True`` takes keys produced by ``answer_key`` (used by ``restore``).
+        Answers are immutable, like the rows they belong to.
+        """
+        staged = {}
+        for sample_id, value in answers.items():
+            if hashed:
+                if value is not None and not (isinstance(value, str) and _ANSWER_KEY.fullmatch(value)):
+                    raise ValueError("stored answers must be 16-hex answer keys or None")
+                key = value
+            else:
+                key = answer_key(value)
+            if sample_id in self._answers and self._answers[sample_id] != key:
+                raise ValueError("immutable answer conflict for sample_id")
+            staged[sample_id] = key
+        if not staged:
+            return
+        self._answers.update(staged)
+        self._version = self._base_version = self._answers_digest = None
 
     def _row_hash(self, row: EvidenceObservation) -> str:
         cached=self._fingerprints.get(row.sample_id)
@@ -361,6 +420,8 @@ class ConditionalCapabilityMap:
                 "invalidations": self.invalidations}
         if self.quality_method == POOLED_METHOD:
             result["pooled"] = self._pooled_config.identity()
+        if self._answers:
+            result["answers"] = {key: self._answers[key] for key in sorted(self._answers)}
         return result
 
     @classmethod
@@ -371,6 +432,8 @@ class ConditionalCapabilityMap:
                      pooled=data.get("pooled"))
         result.add_many([EvidenceObservation.model_validate(r) for r in data["rows"]])
         result.invalidations = list(data.get("invalidations", []))
+        if data.get("answers"):
+            result.add_answers(data["answers"], hashed=True)
         return result
 
     def _valid(self, row: EvidenceObservation, metric: str, at: datetime) -> bool:
@@ -490,24 +553,34 @@ class ConditionalCapabilityMap:
                 info["fail"] += int(row.failed)
             if self._valid(row, "cost", at):
                 info["out"].append(row.output_tokens)
+        answered_rows = []
         def matrices(split):
             entries = [splits[split][rid] for rid in sorted(splits[split])]
             entries = [e for e in entries if e[1]]  # at least one valid quality outcome
             if not entries:
-                return [], np.zeros((0, len(ids))), np.zeros((0, len(ids)))
+                return [], np.zeros((0, len(ids))), np.zeros((0, len(ids))), None, None
             dims = {len(e[0].query_features) for e in entries}
             width = max(dims, key=lambda d: (sum(len(e[0].query_features) == d for e in entries), d))
             entries = [e for e in entries if len(e[0].query_features) == width]
             quality = np.full((len(entries), len(ids)), np.nan)
             cost = np.full((len(entries), len(ids)), np.nan)
+            answers = answered = None
+            if self._answers:
+                answers = np.full((len(entries), len(ids)), None, dtype=object)
+                answered = np.zeros((len(entries), len(ids)), dtype=bool)
             for i, (request, q_rows, c_rows) in enumerate(entries):
                 for endpoint, (_, row) in q_rows.items():
                     quality[i, column[endpoint]] = row.quality
+                    if answers is not None and row.sample_id in self._answers:
+                        answers[i, column[endpoint]] = self._answers[row.sample_id]
+                        answered[i, column[endpoint]] = True
+                        answered_rows.append(row.sample_id)
                 for endpoint, (_, row) in c_rows.items():
                     cost[i, column[endpoint]] = row.cost
-            return [e[0] for e in entries], quality, cost
-        train_requests, train_quality, train_cost = matrices("train")
-        calibration_requests, calibration_quality, _ = matrices("calibration")
+            return [e[0] for e in entries], quality, cost, answers, answered
+        train_requests, train_quality, train_cost, train_answers, train_answered = matrices("train")
+        calibration_requests, calibration_quality, calibration_cost, calibration_answers, calibration_answered = \
+            matrices("calibration")
         for endpoint in ids:
             stats[endpoint]["train"] = int((~np.isnan(train_quality[:, column[endpoint]])).sum()) if len(train_requests) else 0
         for row in used["train"] + used["calibration"]:
@@ -540,16 +613,24 @@ class ConditionalCapabilityMap:
         training_hash = self._lineage_hash(sorted(used["train"], key=lambda r: r.sample_id))
         calibration_hash = self._lineage_hash(sorted(used["calibration"], key=lambda r: r.sample_id))
         future = [t for t in changes if t > at]
-        identity = digest_native({"training": training_hash, "calibration": calibration_hash,
+        identity_fields = {"training": training_hash, "calibration": calibration_hash,
             "predictor": predictor.artifact_digest() if predictor is not None else None,
             "endpoints": [[e, revisions[e]] for e in ids], "feature_version": feature_version,
-            "max_age": float(max_age)})
+            "max_age": float(max_age)}
+        # Only maps that store answers extend the evidence identity; every other identity is unchanged.
+        answers_hash = digest_native([[sid, self._answers[sid]] for sid in sorted(answered_rows)]) if answered_rows else None
+        if answers_hash is not None:
+            identity_fields["answers"] = answers_hash
+        identity = digest_native(identity_fields)
         return PooledEvidence(endpoint_ids=ids, feature_version=feature_version, fitted_at=at,
             next_change=min(future) if future else None, train_requests=train_requests,
             train_quality=train_quality, train_cost=train_cost, calibration_requests=calibration_requests,
             calibration_quality=calibration_quality, endpoints=endpoint_evidence, measured_at=measured,
             trusted_until=min(trust) if trust else None, training_hash=training_hash,
-            calibration_hash=calibration_hash, predictor=predictor, identity=identity)
+            calibration_hash=calibration_hash, predictor=predictor, identity=identity,
+            calibration_cost=calibration_cost, train_answers=train_answers, train_answered=train_answered,
+            calibration_answers=calibration_answers, calibration_answered=calibration_answered,
+            answers_hash=answers_hash)
 
     @staticmethod
     def pooled_numbers(evidence: PooledEvidence, request: RequestContext, endpoint: EndpointSnapshot,
@@ -589,7 +670,7 @@ class ConditionalCapabilityMap:
     def pooled_estimate(self, evidence: PooledEvidence, request: RequestContext, endpoint: EndpointSnapshot,
                         quality_forecast: float, numbers: dict, *, at: datetime, quality_risk: float,
                         target: float | None = None, calibration=None, artifact_base: str | None = None,
-                        certified: bool | None = None):
+                        certified: bool | None = None, assumptions: tuple[str, ...] | None = None):
         """Assemble a CapabilityEstimate; ``quality.lower`` carries the certified population bound.
 
         ``certified`` is decided by the planner's calibrated rule; when omitted, a threshold
@@ -628,12 +709,43 @@ class ConditionalCapabilityMap:
             artifact_hash=digest_native([base, endpoint.endpoint_id]), endpoint_revisions=(endpoint.capability_revision,),
             measured_at=measured, age_seconds=(at - measured).total_seconds(), calibrated=not reasons,
             reasons=tuple(reasons), quality_diagnostics=diagnostics, trusted_until=evidence.trusted_until,
-            assumptions=POOLED_ASSUMPTIONS)
+            assumptions=assumptions or POOLED_ASSUMPTIONS)
         return CapabilityEstimate(endpoint.endpoint_id, quality,
                                   Prediction(mean=numbers["cost"][0], lower=numbers["cost"][1], upper=numbers["cost"][2]),
                                   Prediction(mean=numbers["latency"][0], lower=numbers["latency"][1], upper=numbers["latency"][2]),
                                   Prediction(mean=numbers["failure"][0], lower=numbers["failure"][1], upper=numbers["failure"][2]),
                                   lineage)
+
+    def pooled_compound_estimate(self, evidence: PooledEvidence, request: RequestContext, plan,
+                                 endpoints: tuple[EndpointSnapshot, ...], values: dict, *, quality_forecast: float,
+                                 reasons: tuple[str, ...], at: datetime, quality_risk: float, target: float,
+                                 calibration, artifact_base: str):
+        """CapabilityEstimate for a certified ``agree_escalate`` plan under a cascade calibration.
+
+        ``values`` carries the cost, latency and failure predictions the planner's compound gate
+        used (so serving applies exactly what calibration replayed). ``quality.lower`` is the
+        calibrated population bound over all requests the cascade routes.
+        """
+        from inference_control.planning.planner import CapabilityEstimate
+        q = float(min(1., max(0., quality_forecast)))
+        quality = Prediction(mean=min(1., max(target, q)), lower=target, upper=1.)
+        infos = [evidence.endpoints[e.endpoint_id] for e in endpoints]
+        diagnostics = QualityBoundDiagnostics(method=POOLED_METHOD, predictor="learned", raw_prediction=q,
+            prediction_sample_size=min(i.training_outcomes for i in infos), prediction_projection=quality.mean - q,
+            lower_tail_risk=quality_risk, upper_tail_risk=0., training_mean=None,
+            calibration_mean=calibration.certified_mean, hoeffding_radius=None, calibration_lower=quality.lower,
+            training_mean_clamp=0., comparisons=1, effective_risk=quality_risk)
+        measured = evidence.measured_at or at
+        lineage = EvidenceLineage(target_id=plan.evidence_key, traffic_stratum=self._request_stratum(request),
+            feature_version=request.feature_version, sample_size=min(i.training_outcomes for i in infos),
+            calibration_size=calibration.calibration_requests, training_hash=evidence.training_hash,
+            calibration_hash=digest_native([evidence.calibration_hash, evidence.answers_hash]),
+            artifact_hash=digest_native([artifact_base, plan.evidence_key]),
+            endpoint_revisions=tuple(e.capability_revision for e in endpoints), measured_at=measured,
+            age_seconds=(at - measured).total_seconds(), calibrated=not reasons, reasons=tuple(reasons),
+            quality_diagnostics=diagnostics, trusted_until=evidence.trusted_until, assumptions=CASCADE_ASSUMPTIONS)
+        return CapabilityEstimate(plan.evidence_key, quality, Prediction(**values["cost"]),
+                                  Prediction(**values["latency"]), Prediction(**values["failure"]), lineage)
 
     def estimate(self, request: RequestContext, target_id: str,
                  endpoints: tuple[EndpointSnapshot, ...], *, at: datetime | None = None,

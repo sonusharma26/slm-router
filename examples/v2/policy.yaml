@@ -13,6 +13,8 @@ privacy:
 plans:
   allowed: [direct, abstain]
   max_calls: 1
+  # Answer-agreement cascade (needs stored answers in the capability map): allowed: [direct, agree_escalate, abstain],
+  # max_calls: 2 and verifier: answer_agreement.
   max_candidates: 128
 evidence:
   require_certificate: true
