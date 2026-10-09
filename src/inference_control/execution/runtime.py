@@ -29,8 +29,10 @@ class Adapter(Protocol):
 
 
 class Executor:
-    def __init__(self, adapter: Adapter, verifiers=None, selectors=None):
+    def __init__(self, adapter: Adapter, verifiers=None, selectors=None, agreements=None):
         self.adapter, self.verifiers, self.selectors = adapter, verifiers or {}, selectors or {}
+        # Answer-agreement functions ``fn(first_result, checker_result) -> bool`` for agree_escalate plans.
+        self.agreements = agreements or {}
 
     def execute(self, decision: DecisionRecord, *, policy=None, endpoints=None, certificates=None,
                 messages=None, response_config=None, result_sink: Callable | None = None) -> ExecutionRecord:
@@ -42,7 +44,9 @@ class Executor:
         if len(calls) > plan.max_calls: raise ValueError("call bound violated")
         # Reject unknown local operations BEFORE an endpoint can spend money.
         for s in plan.steps:
-            if isinstance(s,Verify) and s.verifier not in self.verifiers: raise ValueError("unknown local verifier")
+            if isinstance(s,Verify) and plan.plan_type == "agree_escalate":
+                if s.verifier not in self.agreements: raise ValueError("unknown local agreement")
+            elif isinstance(s,Verify) and s.verifier not in self.verifiers: raise ValueError("unknown local verifier")
             if isinstance(s,Select) and s.selector not in self.selectors: raise ValueError("unknown local selector")
         if policy is not None:
             if plan.plan_type not in policy.permitted_plan_types or plan.max_calls > policy.max_calls:
@@ -101,6 +105,65 @@ class Executor:
                 ordered = tuple(sorted(results,key=lambda r:(r.endpoint_id or "",r.provider_request_id)))
                 chosen = self.selectors[select.selector](ordered)
                 if chosen not in ordered: raise ValueError("selector returned an unexecuted response")
+        elif plan.plan_type == "agree_escalate":
+            # First and checker run concurrently (both reserved before dispatch). Agreement serves
+            # first; disagreement serves the checker when it is the quality-first endpoint, else
+            # escalates. A failed call counts as disagreement; no unverified answer is ever served.
+            verify = next(s for s in plan.steps if isinstance(s,Verify))
+            pair, escalation = calls[:2], calls[2:]
+            attempts = len(pair)
+            got = {}
+            with ThreadPoolExecutor(max_workers=len(pair)) as pool:
+                futures = {pool.submit(invoke,s):s for s in pair}
+                for future in as_completed(futures):
+                    step = futures[future]
+                    try: got[step.endpoint_id] = future.result()
+                    except Exception as exc:
+                        errors.append(f"{step.endpoint_id}:{type(exc).__name__}")
+                        if isinstance(exc,ProviderTimeout): timed_out.append(step.endpoint_id)
+                        accounted = False
+                        transitions.append(f"call_failed:{step.endpoint_id}")
+            held = {}
+            for step in pair:  # plan order, so records do not depend on which call finished first
+                if step.endpoint_id in got:
+                    try:
+                        accept(step,got[step.endpoint_id])
+                        held[step.endpoint_id] = got[step.endpoint_id]
+                    except Exception as exc:
+                        errors.append(f"{step.endpoint_id}:{type(exc).__name__}")
+                        accounted = False
+                        transitions.append(f"call_failed:{step.endpoint_id}")
+            first_result, checker_result = (held.get(s.endpoint_id) for s in pair)
+            agreed = False
+            if first_result is not None and checker_result is not None:
+                try: agreed = bool(self.agreements[verify.verifier](first_result,checker_result))
+                except Exception:
+                    transitions.append("agreement_failed_closed")
+            if agreed:
+                transitions.append(f"agreed:{pair[0].endpoint_id},{pair[1].endpoint_id}")
+                chosen = first_result
+            elif not escalation:
+                # The checker is the plan's escalation target; without its answer nothing is served.
+                if checker_result is not None:
+                    transitions.append(f"escalated:{pair[1].endpoint_id}")
+                    chosen = checker_result
+            elif not violations:
+                transitions.append(f"escalated:{escalation[0].endpoint_id}")
+                try: guard()
+                except (ValueError,TimeoutError):
+                    violations.append("PRECALL_GUARD_REJECTED")
+                else:
+                    attempts += 1
+                    try:
+                        result = invoke(escalation[0])
+                        accept(escalation[0],result)
+                        chosen = result
+                    except Exception as exc:
+                        errors.append(f"{escalation[0].endpoint_id}:{type(exc).__name__}")
+                        if isinstance(exc,ProviderTimeout): timed_out.append(escalation[0].endpoint_id)
+                        accounted = False
+                        transitions.append(f"call_failed:{escalation[0].endpoint_id}")
+                        chosen = None
         else:
             for index, step in enumerate(calls):
                 if attempts >= plan.max_calls: raise RuntimeError("call reservation exhausted")

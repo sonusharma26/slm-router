@@ -170,7 +170,10 @@ class SLMRouter:
                      "validation_brier":min(t["brier"] for t in trials),"trials":len(trials)}
         return self.tuning
 
-    def fit(self,queries,outcomes):
+    def fit(self,queries,outcomes,answers=None):
+        """Add training/calibration evidence. ``answers`` maps (request_id, endpoint_id) to the model's
+        extracted answer (None: nothing comparable); pairs it omits have no recorded answer. They
+        enable agree_escalate calibration and are stored as hashes of the normalized answer."""
         if any(q.split not in {"train","calibration"} for q in queries):raise ValueError("SLM fit cannot see validation/test labels")
         lookup={q.request.request_id:q for q in queries}
         observations=[]
@@ -187,18 +190,72 @@ class SLMRouter:
                 evaluator_version=r.evaluator_version,observed_at=self.at,
                 metrics=frozenset({"quality","cost","failure","latency"}) if r.latency_ms is not None else frozenset({"quality","cost","failure"})))
         self.map.add_many(observations)
+        if answers is not None:
+            self.map.add_answers({o.sample_id:answers[(r.request_id,r.endpoint_id)] for o,r in zip(observations,outcomes)
+                                  if (r.request_id,r.endpoint_id) in answers})
 
     def choose(self,query,endpoints,policy):
         self.planner.endpoints={e.endpoint_id:e for e in endpoints}
         start=perf_counter()
         decision=self.planner.decide(query.request,policy,at=self.at)
         calls=[s for s in decision.selected_plan.steps if isinstance(s,Call)]
-        if len(calls)>1:
+        if len(calls)>1 and decision.selected_plan.plan_type!="agree_escalate":
             raise ValueError("single-endpoint matrices cannot score unobserved compound plans")
         quality_certified=bool(calls) and decision.fallback not in {"best_predicted_uncertified","least_shortfall_uncertified"} and (
             decision.estimated_quality is not None and decision.estimated_quality.lower>=policy.minimum_quality)
-        return Selection(calls[0].endpoint_id if calls else None,decision.certificate_status,decision.selected_plan.plan_type,
-            overhead_ms=(perf_counter()-start)*1000,metadata={"decision_fingerprint":decision.decision_fingerprint,
+        metadata={"decision_fingerprint":decision.decision_fingerprint,
                 "quality_lower":decision.estimated_quality.lower if decision.estimated_quality else None,
                 "quality_forecast":decision.estimated_quality.mean if decision.estimated_quality else None,
-                "quality_certified":quality_certified,"fallback":decision.fallback})
+                "quality_certified":quality_certified,"fallback":decision.fallback}
+        if decision.selected_plan.plan_type=="agree_escalate":
+            # The final endpoint is the checker when the plan has only two calls.
+            metadata["cascade"]={"first":calls[0].endpoint_id,"checker":calls[1].endpoint_id,"final":calls[-1].endpoint_id}
+        return Selection(calls[0].endpoint_id if calls else None,decision.certificate_status,decision.selected_plan.plan_type,
+            overhead_ms=(perf_counter()-start)*1000,metadata=metadata)
+
+
+def realize_selection(selection,truth,answers):
+    """Realized (quality, cost, escalated) of a Selection from full-information rows.
+
+    ``truth(endpoint_id)`` returns the benchmark row for this request and endpoint; ``answers``
+    maps (request_id, endpoint_id) to the stored extracted answer. A direct selection is the row's own
+    outcome. An agree_escalate selection is scored the way serving would run it: both calls are paid,
+    agreeing normalized answers serve the first endpoint, otherwise the final endpoint answers (paid
+    for only when it is neither of the two). The decision's plan, not the router's internals, supplies
+    the endpoints, and agreement uses the same ``normalize_answer`` forms as calibration.
+    """
+    from inference_control.routing.cascade import normalize_answer
+    cascade=(selection.metadata or {}).get("cascade")
+    if selection.plan_type!="agree_escalate" or not cascade:
+        row=truth(selection.endpoint_id)
+        return row.quality,row.cost,False
+    first,checker,final=(truth(cascade[name]) for name in ("first","checker","final"))
+    request_id=first.request_id
+    a,b=(normalize_answer(answers.get((request_id,cascade[name]))) for name in ("first","checker"))
+    paid=first.cost+checker.cost
+    if a is not None and a==b:return first.quality,paid,False
+    if cascade["final"] in (cascade["first"],cascade["checker"]):return final.quality,paid,True
+    return final.quality,paid+final.cost,True
+
+
+def evaluate_live_cascade(router,dataset,policy,answers,*,split="test"):
+    """Full-information scoring of an SLMRouter whose policy permits agree_escalate.
+
+    Like ``runner.evaluate_router`` but scores compound decisions with ``realize_selection``. Rows carry
+    the realized quality and cost, whether the request was checked or escalated, and the router's
+    certification flag; truth is read only after choose() has returned.
+    """
+    lookup={(r.request_id,r.endpoint_id):r for r in dataset.outcomes}
+    records=[]
+    for query in dataset.queries:
+        if query.split!=split:continue
+        choice=router.choose(query,tuple(dataset.endpoints),policy)
+        if choice.endpoint_id is None:
+            records.append({"request_id":query.request.request_id,"abstained":True,"quality":0.,"cost":choice.overhead_cost,
+                            "checked":False,"escalated":False,"plan_type":choice.plan_type,"metadata":choice.metadata})
+            continue
+        quality,cost,escalated=realize_selection(choice,lambda e,r=query.request.request_id:lookup[(r,e)],answers)
+        records.append({"request_id":query.request.request_id,"abstained":False,"quality":quality,"cost":cost,
+                        "checked":choice.plan_type=="agree_escalate","escalated":escalated,"plan_type":choice.plan_type,
+                        "metadata":choice.metadata})
+    return records

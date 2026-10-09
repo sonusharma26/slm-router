@@ -24,6 +24,16 @@ POOLED_ASSUMPTIONS = (
 )
 
 
+# A live answer-agreement cascade certifies a different routing policy, so its certificates carry
+# these assumptions in addition to the pooled ones.
+CASCADE_ASSUMPTIONS = POOLED_ASSUMPTIONS + (
+    "Cascade: a checked request runs a first and a checker endpoint concurrently, serves the first answer when their normalized final answers agree, and otherwise serves the quality-first endpoint's answer. The serving agreement function must extract and normalize answers the way the stored calibration answers were.",
+    "Cascade guarantee: with probability at least 1 - quality_risk, mean quality over ALL requests routed by the selected (price penalty, acceptance) configuration, checked or not, is at least minimum_quality. Calibration requests were scored, with a stored answer, on every allowed endpoint.",
+    "Configurations were ordered on training references (leave-one-out forecasts) before calibration outcomes were seen; spend, call-limit and deadline gates for the compound plan use training evidence only, and a request whose compound plan fails a gate is served directly by its first endpoint.",
+    "When the cascade is attempted and fails to certify, the direct rule is tested as a fallback; each test then uses half of quality_risk.",
+)
+
+
 @dataclass(frozen=True)
 class PooledConfig:
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
@@ -107,6 +117,22 @@ class PooledEvidence:
     _training_forecasts: tuple | None = None
     _forecast_cache: dict = field(default_factory=dict)
     _training_means: dict | None = None
+    # Realized cost of calibration rows (requests x endpoints; NaN when unmeasured).
+    calibration_cost: np.ndarray | None = None
+    # Hashed normalized answers (see ConditionalCapabilityMap.add_answers), same layout as the
+    # quality matrices. ``*_answers`` holds a hash, or None where the endpoint gave no comparable
+    # answer; ``*_answered`` is False where no answer was recorded at all. Both stay None on maps
+    # without stored answers.
+    train_answers: np.ndarray | None = None
+    train_answered: np.ndarray | None = None
+    calibration_answers: np.ndarray | None = None
+    calibration_answered: np.ndarray | None = None
+    answers_hash: str | None = None
+
+    @property
+    def has_answers(self) -> bool:
+        return (self.train_answered is not None and self.calibration_answered is not None
+                and bool(self.train_answered.any()) and bool(self.calibration_answered.any()))
 
     def training_mean(self, endpoint_id: str) -> float | None:
         if self._training_means is None:

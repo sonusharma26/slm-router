@@ -4,6 +4,7 @@
 
 - Pooled routing defaults to `rule="utility"`: route to argmax(forecast − λ·cost), with λ calibrated so mean quality over all routed traffic meets the target. `rule="threshold"` stays selectable; saved maps keep their rule.
 - New `inference_control.routing.cascade`: answer-agreement cascades (cheap answer accepted when a checker agrees, otherwise escalate), calibrated with a fixed-sequence test that selects the cheapest passing configuration. Evaluated offline in `slm benchmark compare --zoo` and `scripts/run_llmrouterbench.py` (stored predictions).
+- Live answer-agreement cascade: new `agree_escalate` plan type (first and checker concurrently, escalate on disagreement), a default `answer_agreement` function, answers as capability-map evidence (`add_answers`; hashes unchanged when absent), planner-side cascade calibration inside `pooled_calibration` with compound spend/call/deadline gates, and `SLMRouter.fit(..., answers=)`. Opt in with `plans.allowed: [direct, agree_escalate]`, `max_calls >= 2` and `plans.verifier: answer_agreement`; otherwise serving is unchanged. See the Live serving section of `docs/release/CASCADE_ROUTING_2026-10-09.md`.
 - Fix: forecasts are now identical for a request alone or in a batch (similarity ties broke differently under batched BLAS).
 - Synthetic zoo: cascade AIQ 0.905 vs kNN 0.878 and best possible question-only 0.904. See `docs/release/CASCADE_ROUTING_2026-10-09.md`.
 

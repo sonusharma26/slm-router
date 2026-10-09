@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, Union
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator, field_validator
 
 
 def now() -> datetime:
@@ -146,7 +146,7 @@ class PolicySpec(FrozenContract):
 
     @model_validator(mode="after")
     def bounds(self) -> PolicySpec:
-        allowed = {"direct", "cascade", "verify_escalate", "parallel", "abstain"}
+        allowed = {"direct", "cascade", "verify_escalate", "agree_escalate", "parallel", "abstain"}
         if not self.permitted_plan_types or not self.permitted_plan_types <= allowed:
             raise ValueError("unsupported or empty permitted_plan_types")
         if self.require_certificate and self.infeasible_behavior in {
@@ -195,7 +195,7 @@ PlanStep = Annotated[Union[Call, Verify, Select, Abstain], Field(discriminator="
 
 class ExecutionPlan(FrozenContract):
     plan_id: str = Field(default_factory=lambda: str(uuid4()))
-    plan_type: Literal["direct", "cascade", "verify_escalate", "parallel", "abstain"]
+    plan_type: Literal["direct", "cascade", "verify_escalate", "agree_escalate", "parallel", "abstain"]
     steps: tuple[PlanStep, ...]
     max_calls: int = Field(ge=0)
     max_spend: float = Field(ge=0)
@@ -238,6 +238,15 @@ class ExecutionPlan(FrozenContract):
             raise ValueError("verify-escalate is exactly call, local verify, call")
         if self.plan_type == "cascade" and not all(isinstance(s, Call) for s in self.steps):
             raise ValueError("cascade contains only calls; escalation is on provider failure")
+        if self.plan_type == "agree_escalate":
+            kinds = tuple(type(step) for step in self.steps)
+            if kinds not in ((Call, Call, Verify), (Call, Call, Verify, Call)):
+                raise ValueError("agree-escalate is call, call, local agreement, then an optional escalation call")
+            if self.steps[2].acceptance_rule != "agree":
+                raise ValueError("agree-escalate uses the agree acceptance rule")
+            ids = [step.endpoint_id for step in self.steps if isinstance(step, Call)]
+            if len(set(ids)) != len(ids):
+                raise ValueError("agree-escalate calls distinct endpoints")
         if self.plan_type == "parallel" and not (
             isinstance(self.steps[-1], Select)
             and all(isinstance(s, Call) for s in self.steps[:-1])
@@ -290,6 +299,16 @@ class DecisionRecord(FrozenContract):
     evidence_hash: str | None = None
     decision_fingerprint: str | None = None
     planning_complete: bool = True
+    # Planner notes about how the plan was chosen (e.g. the cascade configuration). Omitted from
+    # serialized records while empty, so decisions without notes keep their historical bytes.
+    plan_metadata: dict[str, object] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_metadata(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("plan_metadata") is None:
+            data.pop("plan_metadata", None)
+        return data
 
 
 class ExecutionRecord(FrozenContract):
