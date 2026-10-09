@@ -24,9 +24,15 @@ Per seed, the script
 3. divides LLMRouterBench's training prompts into train / calibration / validation by a
    prompt hash, leaving its test prompts untouched;
 4. runs the comparison harness (slm-router at several quality targets, the
-   answer-agreement cascade built from each model's stored extracted answer, kNN,
-   threshold, best single model, every single model, and the oracle as a reference) and
-   writes ``report.json`` and ``report.md``.
+   answer-agreement cascade and majority-vote family built from each model's stored extracted
+   answer, kNN, threshold, best single model, every single model, and the oracle as a
+   reference) and writes ``report.json`` and ``report.md``.
+
+Votes call the top-k models (k = 3, 5, ... up to ``--max-voters``) and serve the answer that
+reaches a quorum, comparing the stored ``prediction`` fields after the same normalization the
+agreement cascade uses; missing, blank or NaN predictions are not comparable. The calibration
+picks plain routing, an agreement cascade or a vote, whichever is cheapest among those that
+pass; ``--max-voters 0`` removes the votes (agreement cascades only).
 
 By default the router never sees which dataset a prompt came from (``--task-hints``
 exposes it; that is a different, easier setting). Features are hashed word n-grams, or
@@ -35,6 +41,7 @@ sentence-transformer embeddings with ``--embedder st:<model>``.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -60,6 +67,7 @@ from inference_control.routing.features import (
 from inference_control.util import digest
 
 FIT_SPLITS = ((.6, "train"), (.85, "calibration"), (1., "validation"))  # shares of LLMRouterBench's train prompts
+VOTE_SIZES = (3, 5, 7)  # majority-vote sizes tried, capped by --max-voters
 
 
 def featurizer(spec: str | None):
@@ -69,6 +77,15 @@ def featurizer(spec: str | None):
         embedder = SentenceEmbedder(spec[3:])
         return embedder.feature_version, embedder
     raise ValueError("--embedder must look like st:<sentence-transformers model>")
+
+
+def stored_answer(record):
+    """The model's stored extracted answer; None (not comparable) when missing or NaN.
+
+    Normalization (case, whitespace, trailing period) is applied later by the cascade module.
+    """
+    value = getattr(record, "prediction", None) if record is not None else None
+    return None if isinstance(value, float) and math.isnan(value) else value
 
 
 def fit_split(dataset_id: str, prompt: str, seed: int) -> str:
@@ -118,8 +135,8 @@ def build_dataset(train_records, test_records, *, seed, featurize, feature_versi
         slice_of[request_id] = dataset_id
         for model in models:
             record = g["rows"].get(model)
-            # Extracted answers drive the agreement cascade; missing ones never agree.
-            answers[(request_id, model)] = getattr(record, "prediction", None) if record is not None else None
+            # Extracted answers drive agreement checks and votes; missing ones never agree.
+            answers[(request_id, model)] = stored_answer(record)
             if record is None:
                 filled += 1
                 score, cost, output = 0., mean_cost[model], 0
@@ -156,7 +173,9 @@ def main():
     parser.add_argument("--task-hints", action="store_true", help="let the router see the dataset id (easier setting)")
     parser.add_argument("--quality-risk", type=float, default=.05)
     parser.add_argument("--include-previous", action="store_true", help="also run the previous local router (slow)")
-    parser.add_argument("--no-cascade", action="store_true", help="skip the answer-agreement cascade")
+    parser.add_argument("--no-cascade", action="store_true", help="skip the answer-agreement cascade and votes")
+    parser.add_argument("--max-voters", type=int, default=5,
+                        help="largest majority vote tried (sizes 3, 5, 7 up to this); 0 keeps agreement cascades only")
     parser.add_argument("--out", type=Path, default=ROOT / "results" / "llmrouterbench")
     args = parser.parse_args()
     lrb = args.lrb_root.resolve()
@@ -184,6 +203,7 @@ def main():
     except OSError:
         commit = None
     feature_version, featurize = featurizer(args.embedder)
+    vote_sizes = tuple(v for v in VOTE_SIZES if v <= args.max_voters)
     datasets, slice_of, answers = {}, {}, {}
     for seed, (train, test) in splits.items():
         name = f"LLMRouterBench:{Path(args.config).stem}:seed{seed}"
@@ -196,11 +216,13 @@ def main():
               "missing scores", flush=True)
     report = run_compare(datasets=datasets, slice_of=slice_of, quality_risk=args.quality_risk,
                          answers=None if args.no_cascade else answers,
+                         cascade_voters=vote_sizes,
                          local_targets=LOCAL_TARGETS if args.include_previous else (),
                          policy_overrides={"max_expected_spend": 1e9, "max_absolute_spend": 1e9},
                          progress=lambda message: print(message, flush=True))
     report["llmrouterbench"] = {"root_commit": commit, "config": args.config, "train_ratio": args.train_ratio,
         "records": len(records), "seeds": seeds, "features": feature_version, "task_hints": args.task_hints,
+        "vote_sizes": [] if args.no_cascade else list(vote_sizes),
         "comparability": ("Same loader, split function, seeds and test prompts as LLMRouterBench baselines. "
                           "Compare 'Best per-dataset average' with the paper's AvgAcc and the cost columns with its "
                           "performance-cost results; run LLMRouterBench's own baselines for a direct table.")}
