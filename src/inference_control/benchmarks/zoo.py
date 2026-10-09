@@ -105,13 +105,19 @@ def make_zoo(n: int = 4000, seed: int = 7, *, task_hints: bool = False) -> Bench
 FREE_FORM = frozenset({"writing"})  # outputs that never match exactly, like real essays
 
 
-def zoo_answers(dataset: BenchmarkDataset) -> dict[tuple[str, str], str]:
+def zoo_answers(dataset: BenchmarkDataset, *, common_share: float = .5, alternatives: int = 3
+                ) -> dict[tuple[str, str], str]:
     """Simulated extracted answers for the zoo (synthetic; for cascade code paths only).
 
-    A correct model gives the reference answer. Wrong models share mistakes: half the time
-    the common wrong answer, otherwise one of three others, so two wrong models agree about
-    a third of the time. Free-form domains get unique outputs that never agree.
+    A correct model gives the reference answer. Wrong models share mistakes: with probability
+    ``common_share`` the common wrong answer, otherwise one of ``alternatives`` others, so two wrong
+    models agree with probability ``common_share**2 + (1 - common_share)**2 / alternatives``. The
+    defaults (.5 and 3) make that a third. Raise ``common_share`` to model correlated mistakes;
+    raise ``alternatives`` for near-independent ones. Free-form domains get unique outputs that never
+    agree. The defaults reproduce the original answers exactly.
     """
+    if not 0 <= common_share < 1 or alternatives < 1:
+        raise ValueError("common_share must lie in [0, 1) and alternatives must be positive")
     seed = dataset.provenance.get("seed", 7)
     domains = {}
     for query in dataset.queries:
@@ -126,5 +132,6 @@ def zoo_answers(dataset: BenchmarkDataset) -> dict[tuple[str, str], str]:
             answers[key] = "reference"
         else:
             draw = _unit(seed, row.request_id, row.endpoint_id, "answer")
-            answers[key] = "common-mistake" if draw < .5 else f"mistake-{int((draw - .5) * 6)}"
+            other = min(alternatives - 1, int((draw - common_share) / (1 - common_share) * alternatives))
+            answers[key] = "common-mistake" if draw < common_share else f"mistake-{other}"
     return answers

@@ -378,3 +378,272 @@ def test_compare_reports_cascade_with_answers():
     assert "slm-cascade" in report["aggregate"]
     routers = {c["router"] for c in report["pooled_guarantee"]["checks"]}
     assert routers == {"slm-router", "slm-cascade"}
+
+
+# ----- majority votes --------------------------------------------------------------------------
+def _vote_case(answers, quality, config, *, forecasts=(.5, .6, .8, .9), costs=(1., 2., 4., 10.), realized=None):
+    """One request over endpoints 0..3 (cheap to strong); returns the cascade outcome."""
+    from inference_control.routing.cascade import agreement_matrix, outcome
+    F, C = np.array([forecasts], dtype=float), np.array([costs], dtype=float)
+    R = C if realized is None else np.array([realized], dtype=float)
+    return outcome(F, C, np.array([quality], dtype=float), R, agreement_matrix([answers]), config)
+
+
+def _cfg(lam, k, q, *, sequential=False, accept=2.):
+    from inference_control.routing.cascade import CascadeConfig
+    return CascadeConfig(lam, accept, k, q, sequential)
+
+
+Q4 = [0., 1., .75, .25]  # distinct qualities show which voter's answer is served
+
+
+def test_vote_serves_the_plurality_answer_with_its_best_ranked_voters_quality():
+    # lam=.05 ranks endpoints 2, 1, 0, 3 (scores .60, .50, .45, .40); final = 3
+    for sequential in (False, True):
+        r = _vote_case(["a", "b", "a", "z"], Q4, _cfg(.05, 3, 2, sequential=sequential))
+        # voters 2 ('a'), 1 ('b'), 0 ('a'): 'a' has two votes; its best-ranked voter is endpoint 2
+        assert r.quality[0] == .75 and r.cost[0] == 4 + 2 + 1 and r.calls[0] == 3
+        assert r.consensus[0] and not r.escalated[0] and r.checked[0]
+    # the outvoted answer's quality (endpoint 1) and the final model's are never used
+    r = _vote_case(["x", "x", "y", "y"], Q4, _cfg(.05, 3, 2))
+    assert r.quality[0] == 1. and r.consensus[0]  # 'x' from endpoints 1 and 0; best ranked is endpoint 1
+
+
+def test_parallel_votes_pay_every_voter_and_sequential_votes_stop_at_quorum():
+    answers = ["q", "x", "x", "d"]  # voters 2 ('x'), 1 ('x'), 0 ('q')
+    parallel = _vote_case(answers, Q4, _cfg(.05, 3, 2))
+    sequential = _vote_case(answers, Q4, _cfg(.05, 3, 2, sequential=True))
+    assert parallel.cost[0] == 7 and parallel.calls[0] == 3
+    assert sequential.cost[0] == 6 and sequential.calls[0] == 2  # endpoints 2 and 1 agree: stop
+    assert parallel.quality[0] == sequential.quality[0] == .75
+
+
+def test_vote_quorum_miss_escalates_to_final():
+    # all three voters differ -> escalate; final (endpoint 3) is not a voter, so it is called as well
+    for sequential in (False, True):
+        r = _vote_case(["a", "b", "c", "d"], Q4, _cfg(.05, 3, 2, sequential=sequential))
+        assert r.quality[0] == .25 and r.cost[0] == 4 + 2 + 1 + 10 and r.calls[0] == 4
+        assert r.escalated[0] and not r.consensus[0]
+    # quorum 3: two matching answers are not enough; sequential stops once three can no longer agree
+    r = _vote_case(["x", "x", "y", "d"], Q4, _cfg(.05, 3, 3))
+    assert r.escalated[0] and r.cost[0] == 4 + 2 + 1 + 10 and r.calls[0] == 4
+    r = _vote_case(["x", "x", "y", "d"], Q4, _cfg(.05, 3, 3, sequential=True))
+    assert r.escalated[0] and r.cost[0] == 4 + 2 + 10 and r.calls[0] == 3
+    r = _vote_case(["x", "x", "x", "d"], Q4, _cfg(.05, 3, 3))
+    assert r.consensus[0] and r.quality[0] == .75 and r.cost[0] == 7
+
+
+def test_vote_without_comparable_answers_escalates_instead_of_guessing():
+    for answers in ([None, "", None, None], [None, None, "a", None], ["  ", "...", None, "z"]):
+        for sequential in (False, True):
+            r = _vote_case(answers, Q4, _cfg(.05, 3, 2, sequential=sequential))
+            assert r.escalated[0] and not r.consensus[0] and r.quality[0] == .25  # one lone answer is no quorum
+    r = _vote_case([None, "", None, None], Q4, _cfg(.05, 3, 2))
+    assert r.cost[0] == 7 + 10 and r.calls[0] == 4
+    r = _vote_case([None, "", None, None], Q4, _cfg(.05, 3, 2, sequential=True))
+    assert r.cost[0] == 4 + 2 + 10 and r.calls[0] == 3  # two missing answers leave no way to reach two votes
+
+
+def test_vote_when_final_is_already_a_voter_adds_no_call():
+    # lam=0 ranks by forecast: voters 3, 2, 1 and final = first = 3; the vote is still held
+    r = _vote_case(["x", "c", "b", "a"], Q4, _cfg(0., 3, 2))
+    assert r.escalated[0] and r.quality[0] == .25 and r.cost[0] == 10 + 4 + 2 and r.calls[0] == 3
+    r = _vote_case(["x", "b", "b", "a"], Q4, _cfg(0., 3, 2))  # endpoints 2 and 1 outvote the best model
+    assert r.consensus[0] and r.quality[0] == .75 and r.cost[0] == 16
+    r = _vote_case(["x", "c", "b", "a"], Q4, _cfg(0., 3, 3, sequential=True))
+    assert r.escalated[0] and r.quality[0] == .25 and r.cost[0] == 10 + 4 and r.calls[0] == 2  # final already called
+    # lam=.04 ranks 2, 1, 3, 0: final is the third voter; stopping after two calls means calling it now
+    r = _vote_case(["x", "b", "a", "d"], Q4, _cfg(.04, 3, 3, sequential=True))
+    assert r.escalated[0] and r.cost[0] == 4 + 2 + 10 and r.calls[0] == 3 and r.quality[0] == .25
+    r = _vote_case(["x", "b", "a", "d"], Q4, _cfg(.04, 3, 3))
+    assert r.cost[0] == 4 + 2 + 10 and r.calls[0] == 3  # parallel: final was one of the three calls
+
+
+def test_vote_tie_breaking_is_deterministic():
+    answers = ["b", "b", "a", "a"]  # voters 2 ('a'), 1 ('b'), 0 ('b'), 3 ('a'): two answers with two votes each
+    parallel = _vote_case(answers, Q4, _cfg(.05, 4, 2))
+    assert parallel.quality[0] == .75 and parallel.cost[0] == 17 and parallel.calls[0] == 4  # best-ranked voter's answer
+    sequential = _vote_case(answers, Q4, _cfg(.05, 4, 2, sequential=True))
+    assert sequential.quality[0] == 1. and sequential.cost[0] == 7 and sequential.calls[0] == 3  # first to reach quorum
+    # equal scores go to the earlier position: endpoints 0 and 1 vote, endpoint 2 is never called
+    r = _vote_case(["a", "a", "a", "a"], [1., 0., 0., 0.], _cfg(.1, 2, 2), forecasts=(.7, .7, .7, -np.inf),
+                   costs=(1., 1., 1., 1.), realized=(1., 2., 4., 8.))
+    assert r.quality[0] == 1. and r.cost[0] == 3 and r.calls[0] == 2
+
+
+def test_vote_is_skipped_when_unneeded_or_impossible():
+    r = _vote_case(["a", "a", "a", "a"], Q4, _cfg(.05, 3, 2, accept=.8))  # first's forecast .8 >= accept
+    assert not r.checked[0] and r.calls[0] == 1 and r.cost[0] == 4 and r.quality[0] == .75
+    assert _vote_case(["a", "a", "a", "a"], Q4, _cfg(.05, 3, 2, accept=.81)).checked[0]
+    r = _vote_case(["a", "a", "a", "a"], Q4, _cfg(.05, 3, 2), forecasts=(-np.inf, -np.inf, .8, -np.inf))
+    assert not r.checked[0] and r.calls[0] == 1 and r.quality[0] == .75  # a single allowed endpoint cannot vote
+    # two allowed endpoints cannot reach a quorum of three: escalate to the final one, already called
+    r = _vote_case(["a", "a", "a", "a"], Q4, _cfg(.05, 3, 3), forecasts=(-np.inf, -np.inf, .8, .9))
+    assert r.escalated[0] and r.quality[0] == .25 and r.cost[0] == 4 + 10 and r.calls[0] == 2
+    r = _vote_case(["a"] * 4, Q4, _cfg(.05, 3, 2), forecasts=(-np.inf,) * 4)
+    assert np.isnan(r.quality[0]) and np.isnan(r.cost[0]) and r.calls[0] == 0
+
+
+def test_vote_diagnostics_count_rates_and_calls():
+    from inference_control.routing.cascade import agreement_matrix, diagnostics, outcome
+    answers = [["a", "b", "a", "z"], ["q", "x", "x", "d"], ["a", "b", "c", "d"], [None, None, None, None]]
+    n = len(answers)
+    F, C = np.tile([.5, .6, .8, .9], (n, 1)), np.tile([1., 2., 4., 10.], (n, 1))
+    Q = np.tile(Q4, (n, 1))
+    config = _cfg(.05, 3, 2, sequential=True)
+    result = outcome(F, C, Q, C, agreement_matrix(answers), config)
+    assert result.calls.tolist() == [3, 2, 4, 3] and result.cost.tolist() == [7, 6, 17, 16]
+    d = diagnostics(result, config)
+    assert (d["kind"], d["voters"], d["quorum"]) == ("vote", 3, 2)
+    assert d["check_rate"] == 1. and d["vote_rate"] == .5 and d["escalation_rate"] == .5 and d["mean_calls"] == 3.
+    plain = diagnostics(outcome(F, C, Q, C, agreement_matrix(answers), _cfg(.05, 0, 0, accept=-1.)), _cfg(.05, 0, 0, accept=-1.))
+    assert plain["kind"] == "plain" and plain["mean_calls"] == 1. and plain["vote_rate"] == 0.
+
+
+def test_two_voter_vote_is_the_agreement_cascade_where_final_differs_from_first():
+    from inference_control.routing import cascade
+    rng = np.random.default_rng(3)
+    n, m = 600, 5
+    F = rng.random((n, m)).round(2)
+    F[rng.random((n, m)) < .1] = -np.inf
+    C = rng.random((n, m)).round(2) + .1
+    Q = (rng.random((n, m)) < .6).astype(float)
+    answers = [[None if rng.random() < .1 else rng.choice(["a", "b"]) for _ in range(m)] for _ in range(n)]
+    agree = cascade.agreement_matrix(answers)
+    for lam in (.1, .5):
+        first, _, final, _ = cascade.plan(F, C, cascade.CascadeConfig(lam, 2.))
+        rows = (first >= 0) & (first != final)
+        a = cascade.outcome(F, C, Q, C, agree, cascade.CascadeConfig(lam, 2.))
+        parallel = cascade.outcome(F, C, Q, C, agree, cascade.CascadeConfig(lam, 2., 2, 2))
+        for x, y in ((a.quality, parallel.quality), (a.cost, parallel.cost), (a.escalated, parallel.escalated),
+                     (a.calls, parallel.calls)):
+            assert np.array_equal(x[rows], y[rows], equal_nan=True)
+        # sequential calling only differs by skipping the second call once the first answer is not comparable
+        sequential = cascade.outcome(F, C, Q, C, agree, cascade.CascadeConfig(lam, 2., 2, 2, True))
+        comparable = rows & agree[np.arange(n), np.maximum(first, 0), np.maximum(first, 0)]
+        for x, y in ((a.quality, sequential.quality), (a.cost, sequential.cost), (a.calls, sequential.calls)):
+            assert np.array_equal(x[comparable], y[comparable], equal_nan=True)
+        assert np.array_equal(a.quality[rows], sequential.quality[rows]) and np.all(sequential.cost[rows] <= a.cost[rows] + 1e-12)
+        assert (sequential.calls[rows] < a.calls[rows]).any()
+
+
+def test_cascade_config_is_backward_compatible_and_validates_votes():
+    from inference_control.routing import cascade
+    config = cascade.CascadeConfig(.2, .8)
+    assert (config.voters, config.quorum, config.sequential, config.kind) == (0, 0, False, "agree")
+    assert cascade.CascadeConfig(.2, -1.).kind == "plain" and cascade.config_dict(config) == {"lam": .2, "accept": .8}
+    assert cascade.CascadeConfig(.2, 2., 3).quorum == 2 and cascade.CascadeConfig(.2, 2., 5).quorum == 3  # strict majority
+    for bad in ({"voters": 1}, {"voters": 3, "quorum": 1}, {"voters": 3, "quorum": 4}, {"voters": 3, "accept": -1.},
+                {"voters": 0, "quorum": 2}, {"voters": 0, "sequential": True}):
+        with pytest.raises(ValueError):
+            cascade.CascadeConfig(**{"lam": .1, "accept": 2., **bad})
+    base = cascade.default_configs((0., .1, .3))
+    assert len(base) == 15 and all(c.voters == 0 for c in base)
+    assert base == tuple(cascade.CascadeConfig(lam, a) for lam in (0., .1, .3) for a in (-1., .9, .8, .7, 2.))
+    grid = tuple(np.linspace(0, 3, 30))
+    family = cascade.default_configs(grid, voters=(3, 5))
+    votes = [c for c in family if c.voters]
+    assert family[:150] == cascade.default_configs(grid) and len(family) == 150 + 32
+    assert {(c.voters, c.quorum) for c in votes} == {(3, 2), (3, 3), (5, 3), (5, 4)}
+    assert len({c.lam for c in votes}) == 8 and all(c.sequential and c.accept == 2. for c in votes)
+    assert cascade.vote_lambdas((0., 1., 2.), 8) == (0., 1., 2.) and cascade.vote_lambdas(range(30), 4)[0] == 0
+    assert cascade.vote_lambdas(range(30), 4)[-1] == 29
+    assert {(c.voters, c.quorum) for c in cascade.vote_configs((0., 1.), (2, 3), quorums=(2, 3, 4))} == {(2, 2), (3, 2), (3, 3)}
+
+
+def test_mixed_family_calibration_controls_false_certification():
+    from inference_control.routing import cascade
+    rng = np.random.default_rng(7)
+    p = np.array([.5, .65, .75, .9])
+    cost = np.broadcast_to([1., 2., 4., 10.], (1, 4))
+    def draw(n):
+        Q = (rng.random((n, 4)) < p).astype(float)
+        common = rng.random((n, 4)) < .4  # shared mistakes make some wrong answers agree
+        pick = rng.integers(0, 3, (n, 4))
+        answers = [["ok" if Q[i, j] else ("common" if common[i, j] else f"other{pick[i, j]}") for j in range(4)]
+                   for i in range(n)]
+        F = np.clip(p + rng.normal(0, .07, (n, 4)), 0, 1)
+        c = np.repeat(cost, n, axis=0)
+        return F, c, Q, c.copy(), cascade.agreement_matrix(answers)
+    configs = cascade.default_configs((0., .02, .05, .1, .3), accepts=(-1., .6, 2.), voters=(3,),
+                                      vote_accepts=(2., .6), vote_sequential=(False, True))
+    assert {c.kind for c in configs} == {"plain", "agree", "vote"} and len(configs) == 15 + 40
+    population = draw(100_000)
+    truth = {cfg: float(np.nanmean(cascade.run(*population, cfg)[0])) for cfg in configs}
+    ordered = cascade.order_configs(configs, *draw(3000))
+    target, risk, trials, false, selected = .86, .1, 250, 0, {}
+    assert any(v < target for v in truth.values()) and any(v >= target for v in truth.values())
+    assert any(v < target for c, v in truth.items() if c.voters) and any(v >= target for c, v in truth.items() if c.voters)
+    for _ in range(trials):
+        result = cascade.calibrate(ordered, *draw(150), target=target, risk=risk, minimum_requests=20)
+        if result.selected is not None:
+            selected[result.selected.kind] = selected.get(result.selected.kind, 0) + 1
+            false += truth[result.selected] < target
+    assert false / trials <= risk + 3 * math.sqrt(risk * (1 - risk) / trials)
+    assert selected.get("vote", 0) > 0 and selected.get("agree", 0) > 0  # the mixed family is really used
+    identity = cascade.calibrate(ordered, *draw(150), target=target, risk=risk, minimum_requests=20).identity()
+    assert identity["steps"] and all(set(s["config"]) == ({"lam", "accept", "voters", "quorum", "sequential"} if s["config"].get("voters")
+                                                          else {"lam", "accept"}) for s in identity["steps"])
+
+
+def test_compare_reports_vote_fields_and_can_disable_votes(tmp_path):
+    from inference_control.benchmarks.compare import write_compare_report
+    from inference_control.benchmarks.zoo import zoo_answers
+    data = make_zoo(500, seed=9)
+    answers = zoo_answers(data)
+    options = {"seeds": (1,), "targets": (.6, .9, 1.), "knn_targets": (.5,), "thresholds": (.5,), "local_targets": ()}
+    report = run_compare(data, answers=answers, **options)
+    points = report["splits"][0]["runs"]["slm-cascade"]
+    assert len(points) == 3
+    for point in points:
+        assert point["kind"] in {"plain", "agree", "vote"} and point["mean_calls"] >= 1.
+        assert (point["kind"] == "vote") == (point["voters"] > 0) and point["quorum"] >= (2 if point["voters"] else 0)
+        assert {"lam", "accept", "check_rate", "escalation_rate", "vote_rate", "consensus_rate", "calibrated"} <= set(point)
+        assert point["kind"] != "vote" or (point["check_rate"] > 0 and point["vote_rate"] <= point["check_rate"])
+        assert point["kind"] != "plain" or point["mean_calls"] == 1.
+    checks = [c for c in report["pooled_guarantee"]["checks"] if c["router"] == "slm-cascade"]
+    assert all({"kind", "voters", "quorum", "mean_calls", "price_penalty", "accept"} <= set(c) for c in checks)
+    path = write_compare_report(report, tmp_path)
+    markdown = (path.parent / "report.md").read_text(encoding="utf-8")
+    assert "## Cascade operating points" in markdown
+    agreement_only = run_compare(data, answers=answers, cascade_voters=(), **options)
+    assert {p["kind"] for p in agreement_only["splits"][0]["runs"]["slm-cascade"]} <= {"plain", "agree"}
+
+
+def test_zoo_answers_default_and_correlation_knob():
+    from inference_control.benchmarks.zoo import zoo_answers
+    data = make_zoo(400, seed=2)
+    default = zoo_answers(data)
+    assert default == zoo_answers(data, common_share=.5, alternatives=3)
+    def wrong_pair_agreement(answers):
+        agree = pairs = 0
+        for q in data.queries:
+            wrong = [answers[(q.request.request_id, e.endpoint_id)] for e in data.endpoints]
+            wrong = [a for a in wrong if a != "reference" and not a.startswith("free-form")]
+            for i, a in enumerate(wrong):
+                for b in wrong[i + 1:]:
+                    pairs += 1
+                    agree += a == b
+        return agree / pairs
+    base, correlated, independent = (wrong_pair_agreement(zoo_answers(data, **kw)) for kw in (
+        {}, {"common_share": .9}, {"common_share": 0., "alternatives": 20}))
+    assert base == pytest.approx(1 / 3, abs=.03) and correlated == pytest.approx(.81 + .01 / 3, abs=.03)
+    assert independent == pytest.approx(1 / 20, abs=.02)
+    with pytest.raises(ValueError):
+        zoo_answers(data, common_share=1.)
+
+
+def test_llmrouterbench_votes_compare_normalized_stored_predictions():
+    from inference_control.routing.cascade import agreement_matrix
+    script = _script()
+    def record(prediction):
+        return SimpleNamespace(prediction=prediction)
+    stored = [script.stored_answer(r) for r in (record(" 42."), record("42"), record(float("nan")), record(None), None, record(""))]
+    assert stored[2:5] == [None, None, None]
+    agree = agreement_matrix([stored])[0]
+    assert agree[0, 1] and not agree[0, 2] and not agree[2, 3] and not agree[5, 5]  # NaN, None and blank never agree
+    from inference_control.routing.cascade import CascadeConfig, outcome
+    F, C = np.array([[.9, .8, .7, .6]]), np.array([[1., 1., 1., 1.]])
+    result = outcome(F, C, np.array([[0., 1., 1., 1.]]), C, agreement_matrix([[stored[0], stored[1], stored[2], stored[3]]]),
+                     CascadeConfig(0., 2., 3, 2))
+    assert result.consensus[0] and result.quality[0] == 0.  # '42' twice: served with the best-ranked voter's score

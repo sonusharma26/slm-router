@@ -13,6 +13,10 @@ decisions afterwards. Summaries per router:
 * For the pooled router, the empirical check of its guarantee: the mean test quality
   of certified requests versus each target.
 
+* With answers, the ``slm-cascade`` family (plain price-penalty routing, answer-agreement cascades
+  and majority votes) is calibrated per target; each operating point reports which kind was
+  selected, its voters/quorum, and the endpoints called per request.
+
 Synthetic fixtures exercise code paths only; claims need external datasets.
 """
 from __future__ import annotations
@@ -36,6 +40,7 @@ DEFAULT_TARGETS = (.5, .6, .7, .75, .8, .85, .9, .95, 1.)
 KNN_TARGETS = (.3, .5, .6, .7, .8, .9, .95)
 THRESHOLDS = (.3, .5, .6, .7, .8, .9, .95)
 LOCAL_TARGETS = (.5, .7, .9)
+DEFAULT_VOTERS = (3, 5)  # majority-vote sizes added to the cascade family; () disables votes
 
 
 class FixedRouter:
@@ -161,12 +166,16 @@ def _point(label, rows, slice_of=None, **settings):
     return {"label": label, **settings, **summary}
 
 
-def cascade_runs(slm, dataset, policy, targets, answers, *, at, quality_risk, minimum_requests, slice_of=None):
-    """Calibrate and evaluate answer-agreement cascades on a full-information split.
+def cascade_runs(slm, dataset, policy, targets, answers, *, at, quality_risk, minimum_requests, slice_of=None,
+                 voters=DEFAULT_VOTERS, vote_options=None):
+    """Calibrate and evaluate answer-agreement cascades and majority votes on a full-information split.
 
-    Uses the fitted pooled router's forecasts. Configurations are ordered on training
+    Uses the fitted pooled router's forecasts. The family mixes plain price-penalty routing,
+    agreement cascades and (for ``voters`` sizes that fit the endpoint count) majority votes;
+    ``voters=()`` gives the agreement-only family. Configurations are ordered on training
     references (leave-one-out forecasts), calibrated on the calibration split per target and
     scored on test. Every endpoint is assumed allowed (the harness policy sets no limits).
+    ``vote_options`` forwards ``vote_*`` keywords to ``cascade.default_configs``.
     """
     from inference_control.routing import cascade
     from inference_control.routing.calibration import utility_grid
@@ -185,7 +194,9 @@ def cascade_runs(slm, dataset, policy, targets, answers, *, at, quality_risk, mi
         return F, C, Q, R, A
     reference = matrices(evidence.train_requests, evidence.training_forecasts())
     grid = utility_grid(reference[0], reference[1], steps=30)
-    configs = cascade.order_configs(cascade.default_configs(grid), *reference)
+    sizes = tuple(v for v in voters if 2 <= v <= len(ids))
+    family = cascade.default_configs(grid, voters=sizes, **(vote_options or {}))
+    configs = cascade.order_configs(family, *reference)
     calibration_set = matrices(evidence.calibration_requests)
     test_requests = [q.request for q in dataset.queries if q.split == "test"]
     test = matrices(test_requests)
@@ -194,16 +205,19 @@ def cascade_runs(slm, dataset, policy, targets, answers, *, at, quality_risk, mi
         result = cascade.calibrate(configs, *calibration_set, target=target, risk=quality_risk,
                                    minimum_requests=minimum_requests)
         config = result.selected or configs[0]
-        q, c, escalated = cascade.run(*test, config)
-        _, _, _, check = cascade.plan(test[0], test[1], config)
+        realized = cascade.outcome(*test, config)
+        q, c = realized.quality, realized.cost
+        diagnostics = cascade.diagnostics(realized, config)
         rows = [{"request_id": r.request_id, "quality": float(qi), "cost": float(ci), "abstained": False,
                  "metadata": {"quality_certified": result.selected is not None}}
                 for r, qi, ci in zip(test_requests, q, c)]
-        point = _point(f"target={target}", rows, slice_of, target=target, lam=config.lam, accept=config.accept,
-                       check_rate=float(check.mean()), escalation_rate=float(escalated.mean()))
+        point = _point(f"target={target}", rows, slice_of, target=target, calibrated=result.selected is not None,
+                       **diagnostics)
         points.append(point)
         checks.append({"router": "slm-cascade", "target": target, "threshold": None, "price_penalty": config.lam,
-                       "accept": config.accept, "calibration_certified": result.calibration_requests if result.selected else 0,
+                       "accept": config.accept, "kind": config.kind, "voters": config.voters, "quorum": config.quorum,
+                       "sequential": config.sequential, "mean_calls": diagnostics["mean_calls"],
+                       "calibration_certified": result.calibration_requests if result.selected else 0,
                        "calibration_requests": result.calibration_requests, "calibration_mean": result.certified_mean,
                        "test_certified_share": point["certified_share"], "test_certified_quality": point["certified_quality"],
                        "holds": point["certified_quality"] is None or point["certified_quality"] >= target})
@@ -213,7 +227,8 @@ def cascade_runs(slm, dataset, policy, targets, answers, *, at, quality_risk, mi
 def compare_split(dataset: BenchmarkDataset, *, seed: int, targets=DEFAULT_TARGETS, knn_targets=KNN_TARGETS,
                   thresholds=THRESHOLDS, local_targets=LOCAL_TARGETS, quality_risk: float = .05,
                   min_samples: int = 8, slice_of=None, at=None, progress=None,
-                  policy_overrides: dict | None = None, answers: dict | None = None) -> dict:
+                  policy_overrides: dict | None = None, answers: dict | None = None,
+                  cascade_voters=DEFAULT_VOTERS, cascade_vote_options: dict | None = None) -> dict:
     """Evaluate all routers on one fixed split; returns operating points and frontier summaries."""
     at = at or datetime(2026, 1, 1, tzinfo=UTC)
     train, train_rows = split_data(dataset, {"train"})
@@ -273,7 +288,8 @@ def compare_split(dataset: BenchmarkDataset, *, seed: int, targets=DEFAULT_TARGE
     if answers:
         runs["slm-cascade"], cascade_checks = cascade_runs(
             slm, dataset, policy, tuple(targets), answers, at=at, quality_risk=quality_risk,
-            minimum_requests=min_samples, slice_of=slice_of)
+            minimum_requests=min_samples, slice_of=slice_of, voters=tuple(cascade_voters),
+            vote_options=cascade_vote_options)
         guarantee.extend(cascade_checks)
         note("cascade sweep done")
     if local_targets:
@@ -389,6 +405,20 @@ def write_compare_report(report: dict, out) -> Path:
         mean_cal = f"{c['calibration_mean']:.3f}" if c["calibration_mean"] is not None else "—"
         lines.append(f"| {c.get('router', 'slm-router')} | {c['seed']} | {c['target']} | {c['test_certified_share']:.0%} | "
                      f"{mean_test} | {mean_cal} | {'yes' if c['holds'] else 'NO'} |")
+    cascades = [(split["seed"], point) for split in report["splits"] for point in split["runs"].get("slm-cascade", [])]
+    if cascades:
+        lines += ["", "## Cascade operating points", "",
+                  ("Kind: plain price-penalty routing, answer-agreement cascade, or majority vote (voters/quorum). "
+                   "Rates are shares of test requests; calls are endpoints invoked per request."), "",
+                  "| Split | Target | Kind | Voters/quorum | Penalty | Accept | Calls | Check | Vote | Escalated | Test quality | Test cost | Calibrated |",
+                  "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+        for seed, point in cascades:
+            voting = f"{point['voters']}/{point['quorum']}{' seq' if point.get('sequential') else ''}" if point.get("voters") else "—"
+            cost = f"{point['cost']:.5f}" if point.get("cost") is not None else "—"
+            lines.append(f"| {seed} | {point['target']} | {point.get('kind', 'agree')} | {voting} | {point['lam']:.4g} | "
+                         f"{point['accept']:g} | {point.get('mean_calls', float('nan')):.2f} | {point['check_rate']:.0%} | "
+                         f"{point.get('vote_rate', 0.):.0%} | {point['escalation_rate']:.0%} | {point['quality']:.3f} | {cost} | "
+                         f"{'yes' if point.get('calibrated', True) else 'no'} |")
     lines += ["", "## Claim gate", "", *[f"- {b}" for b in report["claim_gate"]["blockers"]], "",
               *[f"- {n}" for n in report["notes"]]]
     (out / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
