@@ -116,7 +116,10 @@ def run(out: Path, env_file: Path) -> dict:
         }
         calibration_text, expected = "Return only the number 4.", "4"
         calibration_messages = [{"role": "user", "content": calibration_text}]
-        cmap = ConditionalCapabilityMap(k=16, min_samples=1, max_age_seconds=policy.evidence_max_age_seconds)
+        cmap = ConditionalCapabilityMap(
+            k=16, min_samples=1, max_age_seconds=policy.evidence_max_age_seconds,
+            quality_method="local-mean-hoeffding",
+        )
         observed_endpoints = []
         for template in endpoints:
             endpoint = template
@@ -204,6 +207,7 @@ def run(out: Path, env_file: Path) -> dict:
         return report
     except Exception as exc:
         report["error_type"] = type(exc).__name__
+        report["error_message"] = str(exc)[:500]
         if active_endpoint_id is not None:
             report["failed_endpoint_id"] = active_endpoint_id
         response = getattr(exc, "response", None)
@@ -237,7 +241,7 @@ def main() -> int:
     try:
         report = run(args.out.resolve(), args.env_file.resolve())
     except Exception as exc:
-        print(f"Pilot failed: {type(exc).__name__}. See {args.out / 'pilot-report.json'}", file=sys.stderr)
+        print(f"Pilot failed: {type(exc).__name__}: {str(exc)[:500]}. See {args.out / 'pilot-report.json'}", file=sys.stderr)
         return 1
     print(json.dumps({
         "report": str(args.out / "pilot-report.json"),
