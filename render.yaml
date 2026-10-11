@@ -1,0 +1,39 @@
+services:
+  # Router API + /dashboard/ Test Bench. First start makes 3 live NVIDIA calls
+  # (the pilot) to seed state on the persistent disk.
+  - type: web
+    name: slm-router
+    runtime: python
+    plan: starter # persistent disks require a paid plan
+    buildCommand: pip install .
+    startCommand: bash scripts/render_start.sh
+    disk:
+      name: slm-results
+      mountPath: /opt/render/project/src/results
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: SLM_ROUTER_API_KEY
+        generateValue: true # 24+ char random; copy it from the dashboard to use the API
+
+  # Live NVIDIA performance microbenchmark. Trigger manually from the Render
+  # dashboard ("Trigger Run"); the schedule is a once-a-year placeholder.
+  - type: cron
+    name: slm-router-perf
+    runtime: python
+    plan: starter
+    schedule: "0 0 1 1 *"
+    buildCommand: pip install .
+    startCommand: bash scripts/render_perf.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: PERF_REQUESTS_PER_MODEL
+        value: "6"
