@@ -89,7 +89,7 @@ def compare(dataset, selected):
     requests = {query.request.request_id: query.request for query in dataset.queries}
     archived_output_cap_mismatches = sum(row.output_tokens > requests[row.request_id].max_output_tokens
                                        for row in dataset.outcomes)
-    policy = default_policy(minimum_quality=.65, missing_latency=missing_latency)
+    policy = default_policy(minimum_quality=.65, missing_latency=missing_latency, infeasible_behavior="abstain")
     assert policy.minimum_evidence_samples == 8 and policy.quality_risk == .05
     variants = (("baseline-hoeffding-local", "local-mean-hoeffding", {}),
                 ("kl-local", "local-mean-kl", {}),

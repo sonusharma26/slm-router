@@ -82,6 +82,7 @@ def test_confidence_predictor_fit_improves_calibration_and_is_monotonic():
 
 
 def test_confidence_predictor_save_load_roundtrip(tmp_path):
+    pytest.importorskip("joblib")  # artifact persistence is part of the optional legacy stack
     X, y = _synthetic(n=300, seed=4)
     predictor = ConfidencePredictor().fit(X, y)
 

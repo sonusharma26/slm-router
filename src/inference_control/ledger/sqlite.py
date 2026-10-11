@@ -11,7 +11,7 @@ from typing import Any
 from inference_control.util import canonical
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Event:
     sequence: int
     event_id: str
@@ -20,9 +20,29 @@ class Event:
     occurred_at: str
     actor: str
     idempotency_key: str
-    payload: dict[str, Any]
+    payload_json: str
     previous_hash: str
     event_hash: str
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """Decoded on first access: writers and filtered readers skip large snapshot payloads."""
+        try:
+            return self.__dict__["_payload"]
+        except KeyError:
+            value = json.loads(self.payload_json)
+            object.__setattr__(self, "_payload", value)
+            return value
+
+    def _key(self):
+        return (self.sequence, self.event_id, self.event_type, self.schema_version, self.occurred_at,
+                self.actor, self.idempotency_key, self.payload_json, self.previous_hash, self.event_hash)
+
+    def __eq__(self, other):
+        return self._key() == other._key() if isinstance(other, Event) else NotImplemented
+
+    def __hash__(self):
+        return hash(self._key())
 
 
 class SQLiteLedger:
@@ -97,13 +117,24 @@ class SQLiteLedger:
         if row is None: raise KeyError(event_id)
         return self._event(row)
 
-    def events(self, event_type: str | None = None, *, after: int = 0) -> list[Event]:
+    def events(self, event_type: str | None = None, *, after: int = 0,
+               event_types: tuple[str, ...] | None = None) -> list[Event]:
+        """Events after a sequence; ``event_types`` filters in SQL so unrelated payloads are never decoded."""
         with self.lock:
             if event_type:
                 rows = self.connection.execute("SELECT * FROM events WHERE event_type=? AND sequence>? ORDER BY sequence", (event_type,after)).fetchall()
+            elif event_types:
+                marks = ",".join("?" * len(event_types))
+                rows = self.connection.execute(f"SELECT * FROM events WHERE event_type IN ({marks}) AND sequence>? ORDER BY sequence",
+                                               (*event_types, after)).fetchall()
             else:
                 rows = self.connection.execute("SELECT * FROM events WHERE sequence>? ORDER BY sequence", (after,)).fetchall()
         return [self._event(r) for r in rows]
+
+    def last_sequence(self) -> int:
+        with self.lock:
+            row = self.connection.execute("SELECT MAX(sequence) FROM events").fetchone()
+        return row[0] or 0
 
     def verify(self) -> bool:
         previous = "0"*64
@@ -123,5 +154,5 @@ class SQLiteLedger:
     @staticmethod
     def _event(row):
         values = dict(row)
-        values["payload"] = json.loads(values["payload"])
+        values["payload_json"] = values.pop("payload")
         return Event(**values)

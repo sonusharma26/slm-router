@@ -35,7 +35,7 @@ def test_repeated_deadline_failures_revoke_certificates_independently_of_billing
     cmap = evidence()
     if not slices:
         from inference_control.capability.conditional import ConditionalCapabilityMap
-        empty = ConditionalCapabilityMap(k=256,min_samples=10)
+        empty = ConditionalCapabilityMap(k=256,min_samples=10,quality_method="local-mean-kl")
         empty.add_many([row.model_copy(update={"request":row.request.model_copy(update={"traffic_slices":slices})})
                         for row in cmap.rows.values()])
         cmap = empty

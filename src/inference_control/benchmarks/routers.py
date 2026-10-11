@@ -47,17 +47,49 @@ class Baseline:
         groups={}
         for _,row in self.training:groups.setdefault(row.endpoint_id,[]).append(row.quality)
         self.average={e:mean(values) for e,values in groups.items()}
+        # Vectorized neighbor tables per endpoint; same distance and tie-break as before.
+        import numpy as np
+        self._tables={}
+        self._codes={}
+        order={}
+        for endpoint_id in groups:
+            rows=sorted(((q,r) for q,r in self.training if r.endpoint_id==endpoint_id),key=lambda x:x[0].request.request_id)
+            width={len(q.request.query_features) for q,_ in rows}
+            if len(width)!=1:continue
+            hints=[q.request.task_hint or "" for q,_ in rows]
+            for hint in hints:self._codes.setdefault(hint,len(self._codes))
+            self._tables[endpoint_id]=(np.array([q.request.query_features for q,_ in rows],dtype=float),
+                np.array([self._codes[h] for h in hints],dtype=np.int64),
+                np.array([r.quality for _,r in rows],dtype=float))
+            order[endpoint_id]=tuple(q.request.request_id for q,_ in rows)
+        # Full-information matrices share one request list: compute neighbors once per query.
+        self._shared=len(set(order.values()))==1 and len(order)==len(groups)
+        self._last=(None,None)
 
     def _estimate(self,query,endpoint_id):
-        rows=[(q,r) for q,r in self.training if r.endpoint_id==endpoint_id]
-        if not rows:return 0.
-        def distance(item):
-            q,r=item
-            feature_distance=sum((x-y)**2 for x,y in zip(q.request.query_features,query.request.query_features))
-            mismatch=float(q.request.task_hint!=query.request.task_hint)
-            return (mismatch+feature_distance,q.request.request_id)
-        neighbors=sorted(rows,key=distance)[:self.k]
-        return mean(r.quality for _,r in neighbors)
+        import numpy as np
+        table=getattr(self,"_tables",{}).get(endpoint_id)
+        if table is None:
+            rows=[(q,r) for q,r in self.training if r.endpoint_id==endpoint_id]
+            if not rows:return 0.
+            def distance(item):
+                q,r=item
+                feature_distance=sum((x-y)**2 for x,y in zip(q.request.query_features,query.request.query_features))
+                mismatch=float(q.request.task_hint!=query.request.task_hint)
+                return (mismatch+feature_distance,q.request.request_id)
+            neighbors=sorted(rows,key=distance)[:self.k]
+            return mean(r.quality for _,r in neighbors)
+        features,hints,quality=table
+        if features.shape[1]!=len(query.request.query_features):return 0.
+        if self._shared and self._last[0] is query:
+            order=self._last[1]
+        else:
+            code=self._codes.get(query.request.task_hint or "",-1)
+            distance=((features-np.asarray(query.request.query_features,dtype=float))**2).sum(1)+(hints!=code)
+            # Rows are pre-sorted by request_id, so a stable sort keeps the original tie-break.
+            order=np.argsort(distance,kind="stable")[:self.k]
+            if self._shared:self._last=(query,order)
+        return float(np.mean(quality[order]))
 
     def choose(self,query,endpoints,policy):
         start=perf_counter()
@@ -81,14 +113,67 @@ class Baseline:
 class SLMRouter:
     name="slm-router"
     def __init__(self,endpoints,*,k=128,min_samples=20,at=None,
-                 quality_method="local-mean-kl",quality_predictors=None):
+                 quality_method="pooled-ltt",quality_predictors=None,pooled=None,name=None):
         self.at=at or datetime.now(timezone.utc)
         self.map=ConditionalCapabilityMap(k=k,min_samples=min_samples,
-                                         quality_method=quality_method,quality_predictors=quality_predictors)
+                                         quality_method=quality_method,quality_predictors=quality_predictors,pooled=pooled)
         self.planner=Planner(endpoints,capability_map=self.map)
         self.missing_latency=False
+        self.tuning=None
+        if name:self.name=name
 
-    def fit(self,queries,outcomes):
+    def tune(self,queries,outcomes,policy):
+        """Validation-only model selection for pooled routing: predictor hyperparameters by
+        validation Brier score, then the strict-to-loose threshold grid. Both are frozen
+        before calibration outcomes are tested, and never see test labels."""
+        import numpy as np
+        from inference_control.routing.predictor import tune
+        from inference_control.routing.pooled import PooledConfig
+        if self.map.quality_method!="pooled-ltt":raise ValueError("tuning applies to pooled routing")
+        if any(q.split!="validation" for q in queries):raise ValueError("tuning accepts validation queries only")
+        if not queries:return None
+        lookup={q.request.request_id for q in queries}
+        if any(r.request_id not in lookup for r in outcomes):raise ValueError("validation outcome leakage")
+        feature_version=queries[0].request.feature_version
+        evidence=self.planner._pooled_evidence(policy,self.at,feature_version)
+        if not evidence.train_requests:return None
+        column={e:i for i,e in enumerate(evidence.endpoint_ids)}
+        index={q.request.request_id:i for i,q in enumerate(queries)}
+        quality=np.full((len(queries),len(column)),np.nan)
+        for r in outcomes:
+            if r.endpoint_id in column:quality[index[r.request_id],column[r.endpoint_id]]=r.quality
+        config,trials=tune([r.query_features for r in evidence.train_requests],evidence.train_quality,
+            evidence.train_cost,[r.task_hint for r in evidence.train_requests],
+            [q.request.query_features for q in queries],quality,[q.request.task_hint for q in queries],seed=0)
+        rule=self.map.pooled_config.rule
+        self.map.configure_pooled(PooledConfig(predictor=config,rule=rule))
+        grid=self.planner.pooled_threshold_grid([q.request for q in queries],policy,at=self.at) if rule=="threshold" else ()
+        # Fallback margin: how much better another forecast must be before the fallback leaves
+        # the endpoint with the best training mean. Chosen by validation quality of the choice.
+        evidence=self.planner._pooled_evidence(policy,self.at,feature_version)
+        forecast,_=evidence.forecast([q.request for q in queries])
+        means=np.array([evidence.training_mean(e) if evidence.training_mean(e) is not None else -1. for e in evidence.endpoint_ids])
+        anchor=int(np.argmax(means))
+        rows=np.arange(len(queries))
+        observed=~np.isnan(quality)
+        margins={}
+        for margin in (0.,.02,.05,.1,.2,.35,1.):
+            scores=forecast.copy();scores[:,anchor]+=margin
+            scores[~observed]=-np.inf
+            choice=np.argmax(scores,axis=1)
+            picked=quality[rows,choice]
+            margins[margin]=float(np.nanmean(picked)) if np.isfinite(picked).any() else float("nan")
+        best_margin=max(margins,key=lambda m:(round(margins[m],12),m))  # ties: stay with the best single endpoint
+        self.map.configure_pooled(PooledConfig(predictor=config,thresholds=grid or None,fallback_margin=best_margin,rule=rule))
+        self.tuning={"predictor":config.identity(),"thresholds":list(grid),"fallback_margin":best_margin,
+                     "fallback_validation_quality":margins,
+                     "validation_brier":min(t["brier"] for t in trials),"trials":len(trials)}
+        return self.tuning
+
+    def fit(self,queries,outcomes,answers=None):
+        """Add training/calibration evidence. ``answers`` maps (request_id, endpoint_id) to the model's
+        extracted answer (None: nothing comparable); pairs it omits have no recorded answer. They
+        enable agree_escalate calibration and are stored as hashes of the normalized answer."""
         if any(q.split not in {"train","calibration"} for q in queries):raise ValueError("SLM fit cannot see validation/test labels")
         lookup={q.request.request_id:q for q in queries}
         observations=[]
@@ -105,14 +190,72 @@ class SLMRouter:
                 evaluator_version=r.evaluator_version,observed_at=self.at,
                 metrics=frozenset({"quality","cost","failure","latency"}) if r.latency_ms is not None else frozenset({"quality","cost","failure"})))
         self.map.add_many(observations)
+        if answers is not None:
+            self.map.add_answers({o.sample_id:answers[(r.request_id,r.endpoint_id)] for o,r in zip(observations,outcomes)
+                                  if (r.request_id,r.endpoint_id) in answers})
 
     def choose(self,query,endpoints,policy):
         self.planner.endpoints={e.endpoint_id:e for e in endpoints}
         start=perf_counter()
         decision=self.planner.decide(query.request,policy,at=self.at)
         calls=[s for s in decision.selected_plan.steps if isinstance(s,Call)]
-        if len(calls)>1:
+        if len(calls)>1 and decision.selected_plan.plan_type!="agree_escalate":
             raise ValueError("single-endpoint matrices cannot score unobserved compound plans")
+        quality_certified=bool(calls) and decision.fallback not in {"best_predicted_uncertified","least_shortfall_uncertified"} and (
+            decision.estimated_quality is not None and decision.estimated_quality.lower>=policy.minimum_quality)
+        metadata={"decision_fingerprint":decision.decision_fingerprint,
+                "quality_lower":decision.estimated_quality.lower if decision.estimated_quality else None,
+                "quality_forecast":decision.estimated_quality.mean if decision.estimated_quality else None,
+                "quality_certified":quality_certified,"fallback":decision.fallback}
+        if decision.selected_plan.plan_type=="agree_escalate":
+            # The final endpoint is the checker when the plan has only two calls.
+            metadata["cascade"]={"first":calls[0].endpoint_id,"checker":calls[1].endpoint_id,"final":calls[-1].endpoint_id}
         return Selection(calls[0].endpoint_id if calls else None,decision.certificate_status,decision.selected_plan.plan_type,
-            overhead_ms=(perf_counter()-start)*1000,metadata={"decision_fingerprint":decision.decision_fingerprint,
-                "quality_lower":decision.estimated_quality.lower if decision.estimated_quality else None})
+            overhead_ms=(perf_counter()-start)*1000,metadata=metadata)
+
+
+def realize_selection(selection,truth,answers):
+    """Realized (quality, cost, escalated) of a Selection from full-information rows.
+
+    ``truth(endpoint_id)`` returns the benchmark row for this request and endpoint; ``answers``
+    maps (request_id, endpoint_id) to the stored extracted answer. A direct selection is the row's own
+    outcome. An agree_escalate selection is scored the way serving would run it: both calls are paid,
+    agreeing normalized answers serve the first endpoint, otherwise the final endpoint answers (paid
+    for only when it is neither of the two). The decision's plan, not the router's internals, supplies
+    the endpoints, and agreement uses the same ``normalize_answer`` forms as calibration.
+    """
+    from inference_control.routing.cascade import normalize_answer
+    cascade=(selection.metadata or {}).get("cascade")
+    if selection.plan_type!="agree_escalate" or not cascade:
+        row=truth(selection.endpoint_id)
+        return row.quality,row.cost,False
+    first,checker,final=(truth(cascade[name]) for name in ("first","checker","final"))
+    request_id=first.request_id
+    a,b=(normalize_answer(answers.get((request_id,cascade[name]))) for name in ("first","checker"))
+    paid=first.cost+checker.cost
+    if a is not None and a==b:return first.quality,paid,False
+    if cascade["final"] in (cascade["first"],cascade["checker"]):return final.quality,paid,True
+    return final.quality,paid+final.cost,True
+
+
+def evaluate_live_cascade(router,dataset,policy,answers,*,split="test"):
+    """Full-information scoring of an SLMRouter whose policy permits agree_escalate.
+
+    Like ``runner.evaluate_router`` but scores compound decisions with ``realize_selection``. Rows carry
+    the realized quality and cost, whether the request was checked or escalated, and the router's
+    certification flag; truth is read only after choose() has returned.
+    """
+    lookup={(r.request_id,r.endpoint_id):r for r in dataset.outcomes}
+    records=[]
+    for query in dataset.queries:
+        if query.split!=split:continue
+        choice=router.choose(query,tuple(dataset.endpoints),policy)
+        if choice.endpoint_id is None:
+            records.append({"request_id":query.request.request_id,"abstained":True,"quality":0.,"cost":choice.overhead_cost,
+                            "checked":False,"escalated":False,"plan_type":choice.plan_type,"metadata":choice.metadata})
+            continue
+        quality,cost,escalated=realize_selection(choice,lambda e,r=query.request.request_id:lookup[(r,e)],answers)
+        records.append({"request_id":query.request.request_id,"abstained":False,"quality":quality,"cost":cost,
+                        "checked":choice.plan_type=="agree_escalate","escalated":escalated,"plan_type":choice.plan_type,
+                        "metadata":choice.metadata})
+    return records

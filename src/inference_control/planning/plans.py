@@ -38,6 +38,23 @@ def verify_escalate(
     )
 
 
+def agree_escalate(
+    first: str, checker: str, agreement: str, final: str | None, spend_bounds: list[float],
+    max_output_tokens: int = 256,
+) -> ExecutionPlan:
+    """Run ``first`` and ``checker`` concurrently; serve ``first`` when they agree, otherwise
+    serve ``checker`` (when it is the quality-first ``final``) or escalate to ``final``."""
+    escalate = final is not None and final not in (first, checker)
+    calls = [first, checker] + ([final] if escalate else [])
+    if len(spend_bounds) != len(calls):
+        raise ValueError("bounds must match endpoints")
+    steps = [Call(endpoint_id=e, max_output_tokens=max_output_tokens) for e in calls[:2]]
+    steps += [Verify(verifier=agreement, acceptance_rule="agree")]
+    steps += [Call(endpoint_id=final, max_output_tokens=max_output_tokens)] if escalate else []
+    return ExecutionPlan(plan_type="agree_escalate", steps=tuple(steps), max_calls=len(calls),
+                         max_spend=sum(spend_bounds))
+
+
 def parallel(endpoints: list[str], selector: str, spend_bounds: list[float]) -> ExecutionPlan:
     return ExecutionPlan(
         plan_type="parallel",

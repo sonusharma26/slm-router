@@ -25,14 +25,16 @@ class Privacy(Strict):
     boundary: str = "any"
 
 class Plans(Strict):
-    allowed: list[Literal["direct", "cascade", "verify_escalate", "parallel", "abstain"]] = ["direct"]
+    allowed: list[Literal["direct", "cascade", "verify_escalate", "agree_escalate", "parallel", "abstain"]] = ["direct"]
     max_calls: int = Field(default=1, ge=0, le=8)
     verifier: str | None = None
     selector: str | None = None
     max_candidates: int = Field(default=4096, ge=1, le=100000)
 
 class Evidence(Strict):
-    require_certificate: bool = True
+    # False: requests that cannot be certified fall back to the best forecast endpoint
+    # (on_infeasible defaults to best_predicted_fallback). True: certified-only serving.
+    require_certificate: bool = False
     max_age_seconds: int = Field(default=86400, gt=0)
     min_samples: int = Field(default=30, ge=1)
     certificate_ttl_seconds: int = Field(default=3600, gt=0)
@@ -52,7 +54,9 @@ class PolicyDocument(Strict):
     required_traffic_slices: list[str] = Field(default_factory=list)
     maximum_failure_probability: float = Field(default=1, ge=0, le=1)
     objective: Literal["cost", "quality", "latency"] = "cost"
-    on_infeasible: Literal["abstain", "request_relaxation", "safe_fallback", "least_shortfall_uncertified"] = "abstain"
+    # None: best_predicted_fallback, or abstain when certificates are required.
+    on_infeasible: Literal["abstain", "request_relaxation", "safe_fallback", "least_shortfall_uncertified",
+                           "best_predicted_fallback"] | None = None
     safe_fallback_endpoint: str | None = None
 
 
@@ -65,13 +69,18 @@ def compile_policy(value: dict | str | Path) -> PolicySpec:
         raise ValueError("at least one plan type is required")
     if allowed - {"abstain"} and doc.plans.max_calls == 0:
         raise ValueError("non-abstain plans require calls")
-    if allowed & {"cascade", "parallel", "verify_escalate"} and doc.plans.max_calls < 2:
+    if allowed & {"cascade", "parallel", "verify_escalate", "agree_escalate"} and doc.plans.max_calls < 2:
         raise ValueError("compound plans require at least two calls")
     if "verify_escalate" in allowed and not doc.plans.verifier:
         raise ValueError("verify_escalate requires an explicitly registered local verifier")
+    if "agree_escalate" in allowed and not doc.plans.verifier:
+        raise ValueError("agree_escalate requires an explicitly registered answer-agreement function (plans.verifier)")
+    if "agree_escalate" in allowed and "direct" not in allowed:
+        raise ValueError("agree_escalate serves unchecked requests directly, so it also requires the direct plan type")
     if "parallel" in allowed and not doc.plans.selector:
         raise ValueError("parallel requires an explicitly registered local selector")
-    if doc.evidence.require_certificate and doc.on_infeasible == "least_shortfall_uncertified":
+    on_infeasible = doc.on_infeasible or ("abstain" if doc.evidence.require_certificate else "best_predicted_fallback")
+    if doc.evidence.require_certificate and on_infeasible in {"least_shortfall_uncertified", "best_predicted_fallback"}:
         raise ValueError("required certificates cannot be bypassed by fallback")
     return PolicySpec(
         policy_id=doc.policy_id, version=doc.version or digest(doc)[:16],
@@ -88,7 +97,7 @@ def compile_policy(value: dict | str | Path) -> PolicySpec:
         minimum_evidence_samples=doc.evidence.min_samples,
         evidence_max_age_seconds=doc.evidence.max_age_seconds,
         certificate_ttl_seconds=doc.evidence.certificate_ttl_seconds,
-        infeasible_behavior=InfeasibleBehavior(doc.on_infeasible), safe_fallback_endpoint=doc.safe_fallback_endpoint)
+        infeasible_behavior=InfeasibleBehavior(on_infeasible), safe_fallback_endpoint=doc.safe_fallback_endpoint)
 
 
 def validate_pool(policy: PolicySpec, endpoints: list[EndpointSnapshot], request: RequestContext | None = None) -> dict:

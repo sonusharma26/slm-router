@@ -128,3 +128,23 @@ def diagnose_quality(router, dataset, policy):
                 "Required sample counts assume a fixed mean and the current searched family; they are not forecasts.",
                 "Prediction errors use train-only neighborhoods; missing neighborhoods are excluded and counts are disclosed.",
                 "Held-out errors are descriptive and cannot justify tuning features, neighborhoods or risk on this test set."]}
+
+
+def diagnose_pooled(router, policy, dataset):
+    """Pooled learn-then-test calibration summary for the fitted router (no test labels)."""
+    from dataclasses import asdict
+    fit = [q for q in dataset.queries if q.split in {"train", "calibration"}]
+    feature_version = fit[0].request.feature_version if fit else "query-v1"
+    evidence, calibration = router.planner.pooled_calibration(policy, at=router.at, feature_version=feature_version)
+    return {"method": "pooled-ltt", "quality_target": policy.minimum_quality, "quality_risk": policy.quality_risk,
+            "rule": router.map.pooled_config.rule, "threshold": calibration.threshold,
+            "price_penalty": getattr(calibration, "parameter", None), "test": calibration.method,
+            "calibration_requests": calibration.calibration_requests,
+            "certified_calibration_requests": calibration.certified_count,
+            "certified_calibration_mean": calibration.certified_mean,
+            "steps": [asdict(step) for step in calibration.steps],
+            "training_requests": len(evidence.train_requests),
+            "predictor": router.map.pooled_config.identity(), "tuning": router.tuning,
+            "notes": ["The guarantee covers the mean quality of all requests certified by the selected rule "
+                      "(every routed request under the utility rule).",
+                      "Uncertified requests use the policy's fallback and are outside the guarantee."]}

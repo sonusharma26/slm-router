@@ -34,7 +34,7 @@ To run from a checkout without an editable install, put `src` on `PYTHONPATH` an
 
 | Area | Implemented release behavior |
 |---|---|
-| Plan search | Direct, two-call error cascade, two-call verify/escalate, two-branch parallel/select and abstention. Compound plans require their own measured joint evidence. |
+| Plan search | Direct, two-call error cascade, two-call verify/escalate, answer-agreement escalate (pooled routing, opt-in), two-branch parallel/select and abstention. Compound plans require their own measured joint evidence. |
 | Conditional evidence | Frozen query features, exact task/governance/schema slices, length buckets, kNN estimates, distinct train/calibration requests, hashes, sample counts, staleness and uncertainty. |
 | Enforcement | Bound-aware eligibility, cumulative call/spend reservation, exact-request certificates, dependency invalidation, pre-dispatch rechecks, no automatic provider retries and explicit unknown accounting. |
 | Adaptive recovery | Decision-boundary acquisition, durable UTC daily budgets, snapshot drift, windowed quality/latency/failure monitoring, targeted metric invalidation, and recovery acknowledgement. |
@@ -199,7 +199,7 @@ Streaming is rejected before provider inference. The `/v1/chat/completions` impl
 
 ## Validated synthetic benchmark snapshot
 
-The final offline run used seed 42, 1,200 generated requests, 207 held-out test requests and 400 bootstrap resamples. Values below are synthetic fixture measurements, not live-model results.
+This snapshot predates pooled learned routing. The final offline run used seed 42, 1,200 generated requests, 207 held-out test requests and 400 bootstrap resamples. Values below are synthetic fixture measurements, not live-model results.
 
 | Router | Mean quality | Mean simulated cost/request | Latency p95 |
 |---|---:|---:|---:|
@@ -213,6 +213,26 @@ At this operating point, SLM Router used **29.95% less simulated serving spend**
 The dynamic suite also retained its unfavorable result: under a hidden 3× latency shift, the impact strategy incurred **8 violations in 40 decisions** and did not detect the shift within the run. Sparse-refresh strategies tied on the small fixture, so no adaptive advantage or ≤25%-of-exhaustive claim is made.
 
 Release validation: **85 offline tests passed** on Python 3.12.14 with current declared dependencies. No GitHub Actions workflow was run for this preparation cycle. See [validation details](docs/release/VALIDATION.md) and the [benchmark protocol](docs/release/BENCHMARK_LAB.md).
+
+## Learned routing (default)
+
+New capability maps use **pooled learned routing** (`pooled-ltt`):
+
+1. **Forecast.** A predictor trained only on training evidence estimates each endpoint's quality and cost for the request (kNN over request features plus a cluster table).
+2. **Certify.** The planner calibrates its own routing rule on calibration requests that were scored on every eligible endpoint. It certifies the cheapest endpoint whose forecast clears a threshold chosen by a fixed-sequence learn-then-test, so that, with probability at least `1 - quality_risk`, mean quality over all certified traffic is at least `minimum_quality`.
+3. **Fall back.** Requests it cannot certify go to the endpoint with the best forecast (`on_infeasible: best_predicted_fallback`, the default unless `evidence.require_certificate: true`). Hard limits on spend, deadline, privacy and calls still apply.
+
+By default the router routes each request to the endpoint with the best forecast quality minus a calibrated price penalty, which covers all routed traffic with the guarantee. An **answer-checking cascade** (`inference_control.routing.cascade`) goes further: it accepts a cheap answer when a second model agrees and escalates when they disagree. It is evaluated offline, and served live through the opt-in `agree_escalate` plan when the capability map stores answers (`plans.allowed: [direct, agree_escalate]`, `max_calls >= 2`, `plans.verifier: answer_agreement`). On the synthetic zoo it reaches AIQ 0.905, against 0.878 for kNN. See [cascade routing](docs/release/CASCADE_ROUTING_2026-10-09.md).
+
+The per-neighborhood estimators (`local-mean-kl`, `local-mean-hoeffding`) remain available. See [pooled routing](docs/release/POOLED_ROUTING_2026-10-08.md) for the method, assumptions and measured results.
+
+```bash
+# Synthetic multi-model fixture: exercises code paths, not evidence about real models.
+slm benchmark compare --zoo 4000 --seeds 42,43,44 --out results/my-compare
+# LLMRouterBench with its own loader, split and test prompts (needs its data locally).
+python scripts/run_llmrouterbench.py --lrb-root ../LLMRouterBench \
+  --config config/baseline_config_performance_cost.yaml --seeds 42,43,44 --out results/llmrouterbench
+```
 
 ## Benchmark commands
 
@@ -234,6 +254,8 @@ See [Benchmark Lab](docs/release/BENCHMARK_LAB.md) for competitor setup, interpr
 ## What a certificate means
 
 A certificate is an auditable statistical statement under explicit sampling and stability assumptions—not a guarantee that an individual answer is correct. Quality uses a bounded-score local-mean lower confidence bound; latency uses an exact-binomial order-statistic confidence bound on a local population p95. Candidate comparisons consume the declared risk budget. Sparse or stale calibration results in no certificate.
+
+A **pooled** certificate (`pooled-ltt/…`) states something different: the request belongs to the certified population at the calibrated threshold, whose mean quality is at least the policy target with probability `1 - quality_risk`, assuming future traffic is exchangeable with the full-information calibration requests. It is not a per-answer guarantee, and requests served by the uncertified fallback are outside it.
 
 Static token-price reservations are different from statistical claims. They depend on correctly pinned prices, verified input/token overhead, a provider that honors the output cap and no hidden billing. Missing usage, provider errors or revision mismatch cannot be silently converted into free or safe execution.
 

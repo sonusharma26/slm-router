@@ -24,7 +24,8 @@ def run_demo(out):
         max_absolute_spend=.02,deadline_ms=1000,require_certificate=True,minimum_evidence_samples=20)
     request=RequestContext(application_id="synthetic-demo",tenant_policy_id="demo",input_tokens=128,
         max_output_tokens=64,feature_version="fixture-v1",task_hint="arithmetic",traffic_slices=frozenset({"simple"}),query_features=(.2,))
-    cmap=ConditionalCapabilityMap(k=256,min_samples=20)
+    # The drift-recovery walkthrough re-certifies one slice from fresh local evidence.
+    cmap=ConditionalCapabilityMap(k=256,min_samples=20,quality_method="local-mean-kl")
     def observation(ep,index,split,when,prefix):
         q=request.model_copy(update={"request_id":f"{prefix}-{split}-{index}"})
         return EvidenceObservation(sample_id=f"{prefix}:{ep.endpoint_id}:{split}:{index}",request=q,target_id=ep.endpoint_id,
@@ -58,7 +59,7 @@ def run_demo(out):
     replay_before=control.replay(before.decision_id)
     replay_after=control.replay(after.decision_id)
     control.ledger.close()
-    restored=ControlPlane(Planner([],capability_map=ConditionalCapabilityMap()),SQLiteLedger(db))
+    restored=ControlPlane(Planner([],capability_map=ConditionalCapabilityMap(quality_method="local-mean-kl")),SQLiteLedger(db))
     report={"evidence_kind":"synthetic","before":{"plan":before.selected_plan.model_dump(mode="json"),"certificate":before.certificate_status},
         "during":{"plan":during.selected_plan.model_dump(mode="json"),"certificate":during.certificate_status},
         "after":{"plan":after.selected_plan.model_dump(mode="json"),"certificate":after.certificate_status},

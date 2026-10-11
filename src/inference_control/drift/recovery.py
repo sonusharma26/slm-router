@@ -200,6 +200,8 @@ class DriftRecovery:
         finally:
             self._batch = None
 
+    _LATENCY_ORDER_EVENTS = ("execution","probe_completed","probe_failed","latency_receipt","latency_order_repair")
+
     def reconcile_latency(self):
         """Drain durable terminal order, advancing only past successfully handled facts."""
         if self.state is None: return ()
@@ -207,7 +209,9 @@ class DriftRecovery:
             self.state.refresh()
             self.receipts.update(self.state.latency_receipts)
             self.operational.update(self.state.operational_counters)
-            ledger_events = self.state.ledger.events(after=self._latency_sequence)
+            # Only these types affect latency order; map snapshots and other large payloads are skipped.
+            through = self.state.ledger.last_sequence()
+            ledger_events = self.state.ledger.events(after=self._latency_sequence, event_types=self._LATENCY_ORDER_EVENTS)
             terminal = [(event,self._terminal_observations(event)) for event in ledger_events
                         if event.event_type in {"execution","probe_completed","probe_failed"}]
             sources = [(event.sequence,observation) for event,observations in terminal for observation,_ in observations]
@@ -225,7 +229,7 @@ class DriftRecovery:
                         else:
                             events.extend(self.observe_probe(event.payload))
                     self._latency_sequence = event.sequence
-                if ledger_events: self._latency_sequence = ledger_events[-1].sequence
+                if through > self._latency_sequence: self._latency_sequence = through
                 return tuple(events)
             finally:
                 self._draining_latency = False

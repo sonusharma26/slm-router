@@ -8,7 +8,7 @@ import sys
 import math
 from functools import lru_cache
 from importlib.metadata import version,PackageNotFoundError
-from inference_control.contracts import PolicySpec
+from inference_control.contracts import InfeasibleBehavior, PolicySpec
 from inference_control.benchmarks.data import BenchmarkDataset
 from inference_control.benchmarks.routers import Baseline, SLMRouter
 from inference_control.benchmarks.metrics import summarize, paired_difference, matched_frontier
@@ -31,10 +31,15 @@ def environment():
             "source_hash":digest(sources),"dependencies":dependencies}
 
 
-def default_policy(*,minimum_quality=.65,objective="cost",missing_latency=False):
-    return PolicySpec(policy_id="benchmark",version=f"bench-{minimum_quality}-{objective}",minimum_quality=minimum_quality,
+def default_policy(*,minimum_quality=.65,objective="cost",missing_latency=False,
+                   infeasible_behavior=InfeasibleBehavior.BEST_PREDICTED):
+    """Benchmark policy. Requests the router cannot certify fall back to the best forecast
+    endpoint unless a study pins ``infeasible_behavior`` (e.g. ABSTAIN for older studies)."""
+    behavior=InfeasibleBehavior(infeasible_behavior)
+    suffix="" if behavior==InfeasibleBehavior.ABSTAIN else f"-{behavior.value}"
+    return PolicySpec(policy_id="benchmark",version=f"bench-{minimum_quality}-{objective}{suffix}",minimum_quality=minimum_quality,
         max_expected_spend=1.,max_absolute_spend=10.,deadline_ms=1e301 if missing_latency else 2500,
-        objective=objective,minimum_evidence_samples=8,require_certificate=False)
+        objective=objective,minimum_evidence_samples=8,require_certificate=False,infeasible_behavior=behavior)
 
 
 def split_data(dataset, splits):
@@ -80,7 +85,8 @@ def evaluate_router(router,dataset,policy,*,split="test"):
     return records
 
 
-def run_static(dataset:BenchmarkDataset,*,policy=None,seed=42,resamples=400,competitors=None,sweep=True):
+def run_static(dataset:BenchmarkDataset,*,policy=None,seed=42,resamples=400,competitors=None,sweep=True,
+               slm_quality_method="pooled-ltt"):
     train,train_rows=split_data(dataset,{"train"})
     fit,fit_rows=split_data(dataset,{"train","calibration"})
     if not train or not any(q.split=="calibration" for q in fit) or not any(q.split=="test" for q in dataset.queries):
@@ -94,9 +100,11 @@ def run_static(dataset:BenchmarkDataset,*,policy=None,seed=42,resamples=400,comp
     routers=[]
     for mode in ("cheapest","random","best_single","knn","threshold"):
         router=Baseline(mode,seed=seed);router.fit(train,train_rows);routers.append(router)
-    slm=SLMRouter(dataset.endpoints,k=128,min_samples=8);slm.fit(fit,fit_rows);routers.append(slm)
+    slm=SLMRouter(dataset.endpoints,k=128,min_samples=8,quality_method=slm_quality_method);slm.fit(fit,fit_rows);routers.append(slm)
     # Threshold selection is validation-only and frozen before test evaluation.
-    validation,_=split_data(dataset,{"validation"})
+    validation,validation_rows=split_data(dataset,{"validation"})
+    if validation and slm.map.quality_method=="pooled-ltt":
+        slm.tune(validation,validation_rows,policy)
     if validation:
         threshold_router=routers[-2]  # threshold baseline
         trials=[]
@@ -151,8 +159,9 @@ def run_static(dataset:BenchmarkDataset,*,policy=None,seed=42,resamples=400,comp
     if any(v["known_cost_coverage"]<1 for v in results.values()):blockers.append("UNACCOUNTED_ROUTER_OVERHEAD_COST")
     if any(v["ci95"][0]<=0 for v in paired.values()):blockers.append("QUALITY_SUPERIORITY_NOT_ESTABLISHED_AT_THIS_OPERATING_POINT")
     blockers.append("MULTIPLE_DATASETS_SEEDS_AND_MATCHED_COST_INFERENCE_REQUIRED_FOR_BROAD_CLAIMS")
-    from inference_control.benchmarks.diagnostics import diagnose_quality
-    quality_diagnostics = diagnose_quality(slm, dataset, policy)
+    from inference_control.benchmarks.diagnostics import diagnose_pooled, diagnose_quality
+    quality_diagnostics = (diagnose_pooled(slm, policy, dataset) if slm.map.quality_method=="pooled-ltt"
+                           else diagnose_quality(slm, dataset, policy))
     return {"schema":"slm-benchmark-v1","kind":"static","generated_at":datetime.now(timezone.utc).isoformat(),
         "environment":environment(),"dataset":dataset.name,"evidence_kind":dataset.evidence_kind,"dataset_hash":dataset.fingerprint,
         "split_hash":dataset.split_hash,"seed":seed,"python":sys.version,"platform":platform.platform(),
@@ -177,7 +186,15 @@ def write_report(report,out):
             lines.append(f"| {name} | {r['quality_all_requests']:.4f} | {cost} | {r['abstention_rate']:.1%} | {r['certificate_coverage']:.1%} | {r['routing_overhead_p95_ms']:.3f} |")
         lines += ["","## External competitor status",""]
         lines += [f"- {n}: {report['status'][n]['state']}" for n in EXTERNALS]
-        if "quality_diagnostics" in report:
+        if report.get("quality_diagnostics",{}).get("method")=="pooled-ltt":
+            d=report["quality_diagnostics"]
+            lines += ["","## Pooled calibration","",
+                      f"Target {d['quality_target']} at risk {d['quality_risk']}; rule: {d.get('rule','threshold')}; "
+                      + (f"price penalty: {d['price_penalty']}." if d.get('rule')=="utility" else f"selected threshold: {d['threshold']}."),
+                      f"Certified {d['certified_calibration_requests']} of {d['calibration_requests']} calibration requests"
+                      + (f" with mean quality {d['certified_calibration_mean']:.4f}." if d['certified_calibration_mean'] is not None else "."),
+                      "The guarantee covers the mean quality of certified traffic, not individual answers."]
+        elif "quality_diagnostics" in report:
             diagnostic = report["quality_diagnostics"]
             lines += ["", "## Quality bound diagnosis", "",
                       f"Unchanged quality target: {diagnostic['quality_target']}; estimator: {diagnostic['method']}.", "",
